@@ -60,7 +60,7 @@ var dealFlags = []cli.Flag{
 	&cli.IntFlag{
 		Name:  "duration",
 		Usage: "duration of the deal in epochs",
-		Value: 518400, // default is 2880 * 180 == 180 days
+		Value: 1512000, // default is 2880 * 525 == 525 days
 	},
 	&cli.IntFlag{
 		Name:  "provider-collateral",
@@ -69,7 +69,7 @@ var dealFlags = []cli.Flag{
 	&cli.Int64Flag{
 		Name:  "storage-price",
 		Usage: "storage price in attoFIL per epoch per GiB",
-		Value: 1,
+		Value: 0,
 	},
 	&cli.BoolFlag{
 		Name:  "verified",
@@ -226,7 +226,7 @@ func dealCmdAction(cctx *cli.Context, isOnline bool) error {
 
 		log.Debugw("current block height", "number", head)
 
-		startEpoch = head + abi.ChainEpoch(5760) // head + 2 days
+		startEpoch = head + abi.ChainEpoch(20160) // head + 7 days
 	}
 
 	// Create a deal proposal to storage provider using deal protocol v1.2.0 format
