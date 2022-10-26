@@ -80,6 +80,10 @@ var dealFlags = []cli.Flag{
 		Name:  "wallet",
 		Usage: "wallet address to be used to initiate the deal",
 	},
+	&cli.StringFlag{
+		Name:  "filename",
+		Usage: "specify filename, output filename",
+	},
 }
 
 var dealCmd = &cli.Command{
@@ -271,6 +275,7 @@ func dealCmdAction(cctx *cli.Context, isOnline bool) error {
 
 	if cctx.Bool("json") {
 		out := map[string]interface{}{
+			"filename":           cctx.String("filename"),
 			"dealUuid":           dealUuid.String(),
 			"provider":           maddr.String(),
 			"clientWallet":       walletAddr.String(),
@@ -291,6 +296,7 @@ func dealCmdAction(cctx *cli.Context, isOnline bool) error {
 		msg += " for offline deal"
 	}
 	msg += "\n"
+	msg += fmt.Sprintf("  filename: %s\n", cctx.String("filename"))
 	msg += fmt.Sprintf("  deal uuid: %s\n", dealUuid)
 	msg += fmt.Sprintf("  storage provider: %s\n", maddr)
 	msg += fmt.Sprintf("  client wallet: %s\n", walletAddr)
