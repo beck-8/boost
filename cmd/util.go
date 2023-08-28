@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/lotus/api"
@@ -20,7 +21,15 @@ func GetAddrInfo(ctx context.Context, api api.Gateway, maddr address.Address) (*
 	if minfo.PeerId == nil {
 		return nil, fmt.Errorf("storage provider %s has no peer ID set on-chain", maddr)
 	}
-
+	if addr := os.Getenv("MULT_ADDR"); addr != "" {
+		mult, err := multiaddr.NewMultiaddr(addr)
+		if err != nil {
+			return nil, err
+		}
+		tmp := make([][]byte, 0)
+		tmp = append(tmp, mult.Bytes())
+		minfo.Multiaddrs = tmp
+	}
 	var maddrs []multiaddr.Multiaddr
 	for _, mma := range minfo.Multiaddrs {
 		ma, err := multiaddr.NewMultiaddrBytes(mma)
