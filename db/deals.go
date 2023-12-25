@@ -9,6 +9,8 @@ import (
 	"github.com/filecoin-project/boost/db/fielddef"
 	"github.com/filecoin-project/boost/storagemarket/types"
 	"github.com/filecoin-project/boost/storagemarket/types/dealcheckpoints"
+	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/builtin/v9/market"
 	"github.com/google/uuid"
 	"github.com/graph-gophers/graphql-go"
@@ -39,6 +41,13 @@ type dealAccessor struct {
 	def  map[string]fielddef.FieldDefinition
 }
 
+type FilterOptions struct {
+	Checkpoint   *string
+	IsOffline    *bool
+	TransferType *string
+	IsVerified   *bool
+}
+
 func (d *DealsDB) newDealDef(deal *types.ProviderDealState) *dealAccessor {
 	return newDealAccessor(d.db, deal)
 }
@@ -55,6 +64,7 @@ func newDealAccessor(db *sql.DB, deal *types.ProviderDealState) *dealAccessor {
 			"PieceSize":             &fielddef.FieldDef{F: &deal.ClientDealProposal.Proposal.PieceSize},
 			"VerifiedDeal":          &fielddef.FieldDef{F: &deal.ClientDealProposal.Proposal.VerifiedDeal},
 			"IsOffline":             &fielddef.FieldDef{F: &deal.IsOffline},
+			"CleanupData":           &fielddef.FieldDef{F: &deal.CleanupData},
 			"ClientAddress":         &fielddef.AddrFieldDef{F: &deal.ClientDealProposal.Proposal.Client},
 			"ProviderAddress":       &fielddef.AddrFieldDef{F: &deal.ClientDealProposal.Proposal.Provider},
 			"Label":                 &fielddef.LabelFieldDef{F: &deal.ClientDealProposal.Proposal.Label},
@@ -78,6 +88,8 @@ func newDealAccessor(db *sql.DB, deal *types.ProviderDealState) *dealAccessor {
 			"CheckpointAt":          &fielddef.FieldDef{F: &deal.CheckpointAt},
 			"Error":                 &fielddef.FieldDef{F: &deal.Err},
 			"Retry":                 &fielddef.FieldDef{F: &deal.Retry},
+			"FastRetrieval":         &fielddef.FieldDef{F: &deal.FastRetrieval},
+			"AnnounceToIPNI":        &fielddef.FieldDef{F: &deal.AnnounceToIPNI},
 
 			// Needed so the deal can be looked up by signed proposal cid
 			"SignedProposalCID": &fielddef.SignedPropFieldDef{Prop: deal.ClientDealProposal},
@@ -86,11 +98,15 @@ func newDealAccessor(db *sql.DB, deal *types.ProviderDealState) *dealAccessor {
 }
 
 func (d *dealAccessor) scan(row Scannable) error {
+	return scan(dealFields, d.def, row)
+}
+
+func scan(fields []string, def map[string]fielddef.FieldDefinition, row Scannable) error {
 	// For each field
 	dest := []interface{}{}
-	for _, name := range dealFields {
+	for _, name := range fields {
 		// Get a pointer to the field that will receive the scanned value
-		fieldDef := d.def[name]
+		fieldDef := def[name]
 		dest = append(dest, fieldDef.FieldPtr())
 	}
 
@@ -101,7 +117,7 @@ func (d *dealAccessor) scan(row Scannable) error {
 	}
 
 	// For each field
-	for name, fieldDef := range d.def {
+	for name, fieldDef := range def {
 		// Unmarshall the scanned value into deal object
 		err := fieldDef.Unmarshall()
 		if err != nil {
@@ -112,12 +128,16 @@ func (d *dealAccessor) scan(row Scannable) error {
 }
 
 func (d *dealAccessor) insert(ctx context.Context) error {
+	return insert(ctx, "Deals", dealFields, dealFieldsStr, d.def, d.db)
+}
+
+func insert(ctx context.Context, table string, fields []string, fieldsStr string, def map[string]fielddef.FieldDefinition, db *sql.DB) error {
 	// For each field
 	values := []interface{}{}
 	placeholders := make([]string, 0, len(values))
-	for _, name := range dealFields {
+	for _, name := range fields {
 		// Add a placeholder "?"
-		fieldDef := d.def[name]
+		fieldDef := def[name]
 		placeholders = append(placeholders, "?")
 
 		// Marshall the field into a value that can be stored in the database
@@ -129,24 +149,28 @@ func (d *dealAccessor) insert(ctx context.Context) error {
 	}
 
 	// Execute the INSERT
-	qry := "INSERT INTO Deals (" + dealFieldsStr + ") "
+	qry := "INSERT INTO " + table + " (" + fieldsStr + ") "
 	qry += "VALUES (" + strings.Join(placeholders, ",") + ")"
-	_, err := d.db.ExecContext(ctx, qry, values...)
+	_, err := db.ExecContext(ctx, qry, values...)
 	return err
 }
 
 func (d *dealAccessor) update(ctx context.Context) error {
+	return update(ctx, "Deals", dealFields, d.def, d.db, d.deal.DealUuid)
+}
+
+func update(ctx context.Context, table string, fields []string, def map[string]fielddef.FieldDefinition, db *sql.DB, dealUuid uuid.UUID) error {
 	// For each field
 	values := []interface{}{}
 	setNames := make([]string, 0, len(values))
-	for _, name := range dealFields {
+	for _, name := range fields {
 		// Skip the ID field
 		if name == "ID" {
 			continue
 		}
 
 		// Add "fieldName = ?"
-		fieldDef := d.def[name]
+		fieldDef := def[name]
 		setNames = append(setNames, name+" = ?")
 
 		// Marshall the field into a value that can be stored in the database
@@ -158,13 +182,13 @@ func (d *dealAccessor) update(ctx context.Context) error {
 	}
 
 	// Execute the UPDATE
-	qry := "UPDATE Deals "
+	qry := "UPDATE " + table + " "
 	qry += "SET " + strings.Join(setNames, ", ")
 
 	qry += "WHERE ID = ?"
-	values = append(values, d.deal.DealUuid)
+	values = append(values, dealUuid)
 
-	_, err := d.db.ExecContext(ctx, qry, values...)
+	_, err := db.ExecContext(ctx, qry, values...)
 	return err
 }
 
@@ -227,13 +251,36 @@ func (d *DealsDB) BySignedProposalCID(ctx context.Context, proposalCid cid.Cid) 
 	return d.scanRow(row)
 }
 
-func (d *DealsDB) Count(ctx context.Context, query string) (int, error) {
+func (d *DealsDB) BySectorID(ctx context.Context, sectorID abi.SectorID) ([]*types.ProviderDealState, error) {
+	addr, err := address.NewIDAddress(uint64(sectorID.Miner))
+	if err != nil {
+		return nil, fmt.Errorf("creating address from ID %d: %w", sectorID.Miner, err)
+	}
+
+	return d.list(ctx, 0, 0, "ProviderAddress=? AND SectorID=?", addr.String(), sectorID.Number)
+}
+
+func (d *DealsDB) Count(ctx context.Context, query string, filter *FilterOptions) (int, error) {
 	whereArgs := []interface{}{}
 	where := "SELECT count(*) FROM Deals"
 	if query != "" {
-		searchWhere, searchArgs := withSearchQuery(query)
+		searchWhere, searchArgs := withSearchQuery(searchFields, query, true)
 		where += " WHERE " + searchWhere
 		whereArgs = append(whereArgs, searchArgs...)
+	}
+
+	if filter != nil {
+		filterWhere, filterArgs := withSearchFilter(*filter)
+
+		if filterWhere != "" {
+			if query != "" {
+				where += " AND "
+			} else {
+				where += " WHERE "
+			}
+			where += filterWhere
+			whereArgs = append(whereArgs, filterArgs...)
+		}
 	}
 	row := d.db.QueryRowContext(ctx, where, whereArgs...)
 
@@ -250,7 +297,7 @@ func (d *DealsDB) ListCompleted(ctx context.Context) ([]*types.ProviderDealState
 	return d.list(ctx, 0, 0, "Checkpoint = ?", dealcheckpoints.Complete.String())
 }
 
-func (d *DealsDB) List(ctx context.Context, query string, cursor *graphql.ID, offset int, limit int) ([]*types.ProviderDealState, error) {
+func (d *DealsDB) List(ctx context.Context, query string, filter *FilterOptions, cursor *graphql.ID, offset int, limit int) ([]*types.ProviderDealState, error) {
 	where := ""
 	whereArgs := []interface{}{}
 
@@ -265,31 +312,78 @@ func (d *DealsDB) List(ctx context.Context, query string, cursor *graphql.ID, of
 		if where != "" {
 			where += " AND "
 		}
-		searchWhere, searchArgs := withSearchQuery(query)
+		searchWhere, searchArgs := withSearchQuery(searchFields, query, true)
 		where += searchWhere
 		whereArgs = append(whereArgs, searchArgs...)
+	}
+
+	if filter != nil {
+		if where != "" {
+			where += " AND "
+		}
+
+		filterWhere, filterArgs := withSearchFilter(*filter)
+		if filterWhere != "" {
+			where += filterWhere
+			whereArgs = append(whereArgs, filterArgs...)
+		}
 	}
 
 	return d.list(ctx, offset, limit, where, whereArgs...)
 }
 
-var searchFields = []string{"ID", "PieceCID", "ClientAddress", "ProviderAddress", "ClientPeerID", "DealDataRoot", "PublishCID", "SignedProposalCID"}
+func withSearchFilter(filter FilterOptions) (string, []interface{}) {
+	whereArgs := []interface{}{}
+	statements := []string{}
 
-func withSearchQuery(query string) (string, []interface{}) {
+	if filter.Checkpoint != nil {
+		statements = append(statements, "Checkpoint = ?")
+		whereArgs = append(whereArgs, *filter.Checkpoint)
+	}
+
+	if filter.IsOffline != nil {
+		statements = append(statements, "IsOffline = ?")
+		whereArgs = append(whereArgs, *filter.IsOffline)
+	}
+
+	if filter.TransferType != nil {
+		statements = append(statements, "TransferType = ?")
+		whereArgs = append(whereArgs, *filter.TransferType)
+	}
+
+	if filter.IsVerified != nil {
+		statements = append(statements, "VerifiedDeal = ?")
+		whereArgs = append(whereArgs, *filter.IsVerified)
+	}
+
+	if len(statements) == 0 {
+		return "", whereArgs
+	}
+
+	where := "(" + strings.Join(statements, " AND ") + ")"
+	return where, whereArgs
+}
+
+var searchFields = []string{"ID", "PieceCID", "ChainDealID", "ClientAddress", "ProviderAddress", "ClientPeerID", "DealDataRoot", "PublishCID", "SignedProposalCID"}
+
+func withSearchQuery(fields []string, query string, searchLabel bool) (string, []interface{}) {
 	query = strings.Trim(query, " \t\n")
 
 	whereArgs := []interface{}{}
 	where := "("
-	for _, searchField := range searchFields {
+	for _, searchField := range fields {
 		where += searchField + " = ? OR "
 		whereArgs = append(whereArgs, query)
 	}
-	// The label field is prefixed by the ' character
-	// Note: In sqlite the concat operator is ||
-	// Note: To escape a ' character it is prefixed by another '.
-	// So when you put a ' in quotes, you have to write ''''
-	where += "Label = ('''' || ?) OR "
-	whereArgs = append(whereArgs, query)
+
+	if searchLabel {
+		// The label field is prefixed by the ' character
+		// Note: In sqlite the concat operator is ||
+		// Note: To escape a ' character it is prefixed by another '.
+		// So when you put a ' in quotes, you have to write ''''
+		where += "Label = ('''' || ?) OR "
+		whereArgs = append(whereArgs, query)
+	}
 
 	where += " instr(Error, ?) > 0"
 	whereArgs = append(whereArgs, query)

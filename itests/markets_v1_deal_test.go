@@ -17,7 +17,9 @@ func TestMarketsV1Deal(t *testing.T) {
 
 	kit.QuietMiningLogs()
 	framework.SetLogLevel()
-	f := framework.NewTestFramework(ctx, t)
+	var opts []framework.FrameworkOpts
+	opts = append(opts, framework.EnableLegacyDeals(true))
+	f := framework.NewTestFramework(ctx, t, opts...)
 	err := f.Start()
 	require.NoError(t, err)
 	defer f.Stop()
@@ -46,7 +48,7 @@ func TestMarketsV1Deal(t *testing.T) {
 	require.NoError(t, err)
 
 	log.Debugw("deal is sealed, starting retrieval", "cid", dealProposalCid, "root", res.Root)
-	outPath := f.Retrieve(ctx, t, dealProposalCid, res.Root, true)
+	outPath := f.Retrieve(ctx, t, dealProposalCid, res.Root, true, nil)
 
 	log.Debugw("retrieval is done, compare in- and out- files", "in", inPath, "out", outPath)
 	kit.AssertFilesEqual(t, inPath, outPath)

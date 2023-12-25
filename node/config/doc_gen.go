@@ -62,8 +62,32 @@ your node if metadata log is disabled`,
 			Comment: ``,
 		},
 		{
+			Name: "Monitoring",
+			Type: "MonitoringConfig",
+
+			Comment: ``,
+		},
+		{
 			Name: "Tracing",
 			Type: "TracingConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "LocalIndexDirectory",
+			Type: "LocalIndexDirectoryConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "ContractDeals",
+			Type: "ContractDealsConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "HttpDownload",
+			Type: "HttpDownloadConfig",
 
 			Comment: ``,
 		},
@@ -87,7 +111,7 @@ your node if metadata log is disabled`,
 		},
 		{
 			Name: "IndexProvider",
-			Type: "lotus_config.IndexProviderConfig",
+			Type: "IndexProviderConfig",
 
 			Comment: ``,
 		},
@@ -116,6 +140,26 @@ your node if metadata log is disabled`,
 			Type: "lotus_config.Pubsub",
 
 			Comment: ``,
+		},
+	},
+	"ContractDealsConfig": []DocField{
+		{
+			Name: "Enabled",
+			Type: "bool",
+
+			Comment: `Whether to enable chain monitoring in order to accept contract deals`,
+		},
+		{
+			Name: "AllowlistContracts",
+			Type: "[]string",
+
+			Comment: `Allowlist for contracts that this SP should accept deals from`,
+		},
+		{
+			Name: "From",
+			Type: "string",
+
+			Comment: `From address for eth_ state call`,
 		},
 	},
 	"DealmakingConfig": []DocField{
@@ -173,7 +217,9 @@ before being assigned to a sector`,
 			Name: "MaxDealStartDelay",
 			Type: "Duration",
 
-			Comment: `Maximum amount of time proposed deal StartEpoch can be in future`,
+			Comment: `Maximum amount of time proposed deal StartEpoch can be in the future.
+This is applicable only for online deals as offline deals can take long duration
+to import the data`,
 		},
 		{
 			Name: "MaxProviderCollateralMultiplier",
@@ -222,24 +268,57 @@ Set this value to 0 to indicate there is no limit per host.`,
 			Comment: `The amount of time to keep deal proposal logs for before cleaning them up.`,
 		},
 		{
+			Name: "RetrievalLogDuration",
+			Type: "Duration",
+
+			Comment: `The amount of time to keep retrieval deal logs for before cleaning them up.
+Note RetrievalLogDuration should exceed the StalledRetrievalTimeout as the
+logs db is leveraged for pruning stalled retrievals.`,
+		},
+		{
+			Name: "StalledRetrievalTimeout",
+			Type: "Duration",
+
+			Comment: `The amount of time stalled retrieval deals will remain open before being canceled.`,
+		},
+		{
 			Name: "Filter",
 			Type: "string",
 
 			Comment: `A command used for fine-grained evaluation of storage deals
-see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-fine-grained-storage-and-retrieval-deal-acceptance for more details`,
+see https://boost.filecoin.io/configuration/deal-filters for more details`,
 		},
 		{
 			Name: "RetrievalFilter",
 			Type: "string",
 
 			Comment: `A command used for fine-grained evaluation of retrieval deals
-see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-fine-grained-storage-and-retrieval-deal-acceptance for more details`,
+see https://boost.filecoin.io/configuration/deal-filters for more details`,
 		},
 		{
 			Name: "RetrievalPricing",
 			Type: "*lotus_config.RetrievalPricing",
 
 			Comment: ``,
+		},
+		{
+			Name: "BlockstoreCacheMaxShards",
+			Type: "int",
+
+			Comment: `The maximum number of shards cached by the Dagstore for retrieval
+Lower this limit if boostd memory is too high during retrievals`,
+		},
+		{
+			Name: "BlockstoreCacheExpiry",
+			Type: "Duration",
+
+			Comment: `How long a blockstore shard should be cached before expiring without use`,
+		},
+		{
+			Name: "IsUnsealedCacheExpiry",
+			Type: "Duration",
+
+			Comment: `How long to cache calls to check whether a sector is unsealed`,
 		},
 		{
 			Name: "MaxTransferDuration",
@@ -251,7 +330,8 @@ see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-f
 			Name: "RemoteCommp",
 			Type: "bool",
 
-			Comment: `Whether to do commp on the Boost node (local) or on the Sealer (remote)`,
+			Comment: `Whether to do commp on the Boost node (local) or on the Sealer (remote)
+Please note that this only works for v1.2.0 deals and not legacy deals`,
 		},
 		{
 			Name: "MaxConcurrentLocalCommp",
@@ -292,13 +372,84 @@ another concurrent download is allowed to start).`,
 			Name: "BitswapPeerID",
 			Type: "string",
 
-			Comment: `The peed id used by booster-bitswap. To set, copy the value
-printed by running 'booster-bitswap init'. If this value is set,
-Boost will:
-- listen on bitswap protocols on its own peer id and forward them
-to booster bitswap
-- advertise bitswap records to the content indexer
-- list bitswap in available transports on the retrieval transport protocol`,
+			Comment: `The libp2p peer id used by booster-bitswap.
+Run 'booster-bitswap init' to get the peer id.
+When BitswapPeerID is not empty boostd will:
+- listen on bitswap protocols on boostd's own peer id and proxy
+requests to booster-bitswap
+- advertise boostd's peer id in bitswap records to the content indexer
+(bitswap clients connect to boostd, which proxies the requests to
+booster-bitswap)
+- list bitswap as an available transport on the retrieval transport protocol`,
+		},
+		{
+			Name: "BitswapPublicAddresses",
+			Type: "[]string",
+
+			Comment: `Public multiaddresses for booster-bitswap.
+If empty
+- booster-bitswap is assumed to be running privately
+- boostd acts as a proxy: it listens on bitswap protocols on boostd's own
+peer id and forwards them to booster-bitswap
+If public addresses are set
+- boostd announces the booster-bitswap peer id to the indexer as an
+extended provider
+- clients make connections directly to the booster-bitswap process
+(boostd does not act as a proxy)`,
+		},
+		{
+			Name: "BitswapPrivKeyFile",
+			Type: "string",
+
+			Comment: `If operating in public mode, in order to announce booster-bitswap as an extended provider, this value must point to a
+a file containing the booster-bitswap peer id's private key. Can be left blank when operating with protocol proxy.`,
+		},
+		{
+			Name: "DealLogDurationDays",
+			Type: "int",
+
+			Comment: `The deal logs older than DealLogDurationDays are deleted from the logsDB
+to keep the size of logsDB in check. Set the value as "0" to disable log cleanup`,
+		},
+		{
+			Name: "SealingPipelineCacheTimeout",
+			Type: "Duration",
+
+			Comment: `The sealing pipeline status is cached by Boost if deal filters are enabled to avoid constant call to
+lotus-miner API. SealingPipelineCacheTimeout defines cache timeout value in seconds. Default is 30 seconds.
+Any value less than 0 will result in use of default`,
+		},
+		{
+			Name: "FundsTaggingEnabled",
+			Type: "bool",
+
+			Comment: `Whether to enable tagging of funds. If enabled, each time a deal is
+accepted boost will tag funds for that deal so that they cannot be used
+for any other deal.`,
+		},
+		{
+			Name: "EnableLegacyStorageDeals",
+			Type: "bool",
+
+			Comment: `Whether to enable legacy deals on the Boost node or not. We recommend keeping
+them disabled. These will be completely deprecated soon.`,
+		},
+		{
+			Name: "ManualDealPublish",
+			Type: "bool",
+
+			Comment: `When set to true, the user is responsible for publishing deals manually.
+The values of MaxDealsPerPublishMsg and PublishMsgPeriod will be
+ignored, and deals will remain in the pending state until manually published.`,
+		},
+		{
+			Name: "GraphsyncStorageAccessApiInfo",
+			Type: "[]string",
+
+			Comment: `The connect strings for the RPC APIs of each miner that boost can read
+sector data from when serving graphsync retrievals.
+If this parameter is not set, boost will serve data from the endpoint
+configured in SectorIndexApiInfo.`,
 		},
 	},
 	"FeeConfig": []DocField{
@@ -317,10 +468,231 @@ to booster bitswap
 	},
 	"GraphqlConfig": []DocField{
 		{
+			Name: "ListenAddress",
+			Type: "string",
+
+			Comment: `The ip address the GraphQL server will bind to. Default: 127.0.0.1`,
+		},
+		{
 			Name: "Port",
 			Type: "uint64",
 
 			Comment: `The port that the graphql server listens on`,
+		},
+	},
+	"HttpDownloadConfig": []DocField{
+		{
+			Name: "NChunks",
+			Type: "int",
+
+			Comment: `NChunks is a number of chunks to split HTTP downloads into. Each chunk is downloaded in the goroutine of its own
+which improves the overall download speed. NChunks is always equal to 1 for libp2p transport because libp2p server
+doesn't support range requests yet. NChunks must be greater than 0 and less than 16, with the default of 5.`,
+		},
+		{
+			Name: "AllowPrivateIPs",
+			Type: "bool",
+
+			Comment: `AllowPrivateIPs defines whether boost should allow HTTP downloads from private IPs as per https://en.wikipedia.org/wiki/Private_network.
+The default is false.`,
+		},
+	},
+	"IndexProviderAnnounceConfig": []DocField{
+		{
+			Name: "AnnounceOverHttp",
+			Type: "bool",
+
+			Comment: `Make a direct announcement to a list of indexing nodes over http.
+Note that announcements are already made over pubsub regardless
+of this setting.`,
+		},
+		{
+			Name: "DirectAnnounceURLs",
+			Type: "[]string",
+
+			Comment: `The list of URLs of indexing nodes to announce to.`,
+		},
+	},
+	"IndexProviderConfig": []DocField{
+		{
+			Name: "Enable",
+			Type: "bool",
+
+			Comment: `Enable set whether to enable indexing announcement to the network and expose endpoints that
+allow indexer nodes to process announcements. Enabled by default.`,
+		},
+		{
+			Name: "EntriesCacheCapacity",
+			Type: "int",
+
+			Comment: `EntriesCacheCapacity sets the maximum capacity to use for caching the indexing advertisement
+entries. Defaults to 1024 if not specified. The cache is evicted using LRU policy. The
+maximum storage used by the cache is a factor of EntriesCacheCapacity, EntriesChunkSize and
+the length of multihashes being advertised. For example, advertising 128-bit long multihashes
+with the default EntriesCacheCapacity, and EntriesChunkSize means the cache size can grow to
+256MiB when full.`,
+		},
+		{
+			Name: "EntriesChunkSize",
+			Type: "int",
+
+			Comment: `EntriesChunkSize sets the maximum number of multihashes to include in a single entries chunk.
+Defaults to 16384 if not specified. Note that chunks are chained together for indexing
+advertisements that include more multihashes than the configured EntriesChunkSize.`,
+		},
+		{
+			Name: "TopicName",
+			Type: "string",
+
+			Comment: `TopicName sets the topic name on which the changes to the advertised content are announced.
+If not explicitly specified, the topic name is automatically inferred from the network name
+in following format: '/indexer/ingest/<network-name>'
+Defaults to empty, which implies the topic name is inferred from network name.`,
+		},
+		{
+			Name: "PurgeCacheOnStart",
+			Type: "bool",
+
+			Comment: `PurgeCacheOnStart sets whether to clear any cached entries chunks when the provider engine
+starts. By default, the cache is rehydrated from previously cached entries stored in
+datastore if any is present.`,
+		},
+		{
+			Name: "WebHost",
+			Type: "string",
+
+			Comment: `The network indexer host that the web UI should link to for published announcements`,
+		},
+		{
+			Name: "Announce",
+			Type: "IndexProviderAnnounceConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "HttpPublisher",
+			Type: "IndexProviderHttpPublisherConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "DataTransferPublisher",
+			Type: "bool",
+
+			Comment: `Set this to true to use the legacy data-transfer/graphsync publisher.
+This should only be used as a temporary fall-back if publishing ipnisync
+over libp2p or HTTP is not working, and publishing over
+data-transfer/graphsync was previously working.`,
+		},
+	},
+	"IndexProviderHttpPublisherConfig": []DocField{
+		{
+			Name: "Enabled",
+			Type: "bool",
+
+			Comment: `If enabled, requests are served over HTTP instead of libp2p.`,
+		},
+		{
+			Name: "PublicHostname",
+			Type: "string",
+
+			Comment: `Set the public hostname / IP for the index provider listener.
+eg "82.129.73.111"
+This is usually the same as the for the boost node.`,
+		},
+		{
+			Name: "Port",
+			Type: "int",
+
+			Comment: `Set the port on which to listen for index provider requests over HTTP.
+Note that this port must be open on the firewall.`,
+		},
+		{
+			Name: "WithLibp2p",
+			Type: "bool",
+
+			Comment: `Set this to true to publish HTTP over libp2p in addition to plain HTTP,
+Otherwise, the publisher will publish content advertisements using only
+plain HTTP if Enabled is true.`,
+		},
+	},
+	"LocalIndexDirectoryConfig": []DocField{
+		{
+			Name: "Yugabyte",
+			Type: "LocalIndexDirectoryYugabyteConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "Leveldb",
+			Type: "LocalIndexDirectoryLeveldbConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "ParallelAddIndexLimit",
+			Type: "int",
+
+			Comment: `The maximum number of add index operations allowed to execute in parallel.
+The add index operation is executed when a new deal is created - it fetches
+the piece from the sealing subsystem, creates an index of where each block
+is in the piece, and adds the index to the local index directory.`,
+		},
+		{
+			Name: "AddIndexConcurrency",
+			Type: "int",
+
+			Comment: `AddIndexConcurrency sets the number of concurrent tasks that each add index operation is split into.
+This setting is usefull to better utilise bandwidth between boostd and boost-data. The default value is 8.`,
+		},
+		{
+			Name: "EmbeddedServicePort",
+			Type: "uint64",
+
+			Comment: `The port that the embedded local index directory data service runs on.
+Set this value to zero to disable the embedded local index directory data service
+(in that case the local index directory data service must be running externally)`,
+		},
+		{
+			Name: "ServiceApiInfo",
+			Type: "string",
+
+			Comment: `The connect string for the local index directory data service RPC API eg "ws://localhost:8042"
+Set this value to "" if the local index directory data service is embedded.`,
+		},
+		{
+			Name: "ServiceRPCTimeout",
+			Type: "Duration",
+
+			Comment: `The RPC timeout when making requests to the boostd-data service`,
+		},
+	},
+	"LocalIndexDirectoryLeveldbConfig": []DocField{
+		{
+			Name: "Enabled",
+			Type: "bool",
+
+			Comment: ``,
+		},
+	},
+	"LocalIndexDirectoryYugabyteConfig": []DocField{
+		{
+			Name: "Enabled",
+			Type: "bool",
+
+			Comment: ``,
+		},
+		{
+			Name: "ConnectString",
+			Type: "string",
+
+			Comment: `The yugabyte postgres connect string eg "postgresql://postgres:postgres@localhost"`,
+		},
+		{
+			Name: "Hosts",
+			Type: "[]string",
+
+			Comment: `The yugabyte cassandra hosts eg ["127.0.0.1"]`,
 		},
 	},
 	"LotusDealmakingConfig": []DocField{
@@ -406,14 +778,14 @@ regardless of this number.`,
 			Type: "string",
 
 			Comment: `A command used for fine-grained evaluation of storage deals
-see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-fine-grained-storage-and-retrieval-deal-acceptance for more details`,
+see https://boost.filecoin.io/configuration/deal-filters for more details`,
 		},
 		{
 			Name: "RetrievalFilter",
 			Type: "string",
 
 			Comment: `A command used for fine-grained evaluation of retrieval deals
-see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-fine-grained-storage-and-retrieval-deal-acceptance for more details`,
+see https://boost.filecoin.io/configuration/deal-filters for more details`,
 		},
 		{
 			Name: "RetrievalPricing",
@@ -422,12 +794,37 @@ see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-f
 			Comment: ``,
 		},
 	},
+	"MonitoringConfig": []DocField{
+		{
+			Name: "MpoolAlertEpochs",
+			Type: "int64",
+
+			Comment: `The number of epochs after which alert is generated for a local pending
+message in lotus mpool`,
+		},
+	},
 	"StorageConfig": []DocField{
 		{
 			Name: "ParallelFetchLimit",
 			Type: "int",
 
 			Comment: `The maximum number of concurrent fetch operations to the storage subsystem`,
+		},
+		{
+			Name: "StorageListRefreshDuration",
+			Type: "Duration",
+
+			Comment: `How frequently Boost should refresh the state of sectors with Lotus. (default: 1hour)
+When run, Boost will trigger a storage redeclare on the miner in addition to a storage list.
+This ensures that index metadata for sectors reflects their status (removed, unsealed, etc).`,
+		},
+		{
+			Name: "RedeclareOnStorageListRefresh",
+			Type: "bool",
+
+			Comment: `Whether or not Boost should have lotus redeclare its storage list (default: true).
+Disable this if you wish to manually handle the refresh. If manually managing the redeclare
+and it is not triggered, retrieval quality for users will be impacted.`,
 		},
 	},
 	"TracingConfig": []DocField{
@@ -455,7 +852,7 @@ see https://docs.filecoin.io/mine/lotus/miner-configuration/#using-filters-for-f
 			Name: "Miner",
 			Type: "string",
 
-			Comment: `The "owner" address of the miner`,
+			Comment: `The miner ID`,
 		},
 		{
 			Name: "PublishStorageDeals",
@@ -806,10 +1203,114 @@ see https://lotus.filecoin.io/storage-providers/advanced-configurations/market/#
 			Comment: ``,
 		},
 	},
+	"lotus_config.Events": []DocField{
+		{
+			Name: "DisableRealTimeFilterAPI",
+			Type: "bool",
+
+			Comment: `EnableEthRPC enables APIs that
+DisableRealTimeFilterAPI will disable the RealTimeFilterAPI that can create and query filters for actor events as they are emitted.
+The API is enabled when EnableEthRPC is true, but can be disabled selectively with this flag.`,
+		},
+		{
+			Name: "DisableHistoricFilterAPI",
+			Type: "bool",
+
+			Comment: `DisableHistoricFilterAPI will disable the HistoricFilterAPI that can create and query filters for actor events
+that occurred in the past. HistoricFilterAPI maintains a queryable index of events.
+The API is enabled when EnableEthRPC is true, but can be disabled selectively with this flag.`,
+		},
+		{
+			Name: "FilterTTL",
+			Type: "Duration",
+
+			Comment: `FilterTTL specifies the time to live for actor event filters. Filters that haven't been accessed longer than
+this time become eligible for automatic deletion.`,
+		},
+		{
+			Name: "MaxFilters",
+			Type: "int",
+
+			Comment: `MaxFilters specifies the maximum number of filters that may exist at any one time.`,
+		},
+		{
+			Name: "MaxFilterResults",
+			Type: "int",
+
+			Comment: `MaxFilterResults specifies the maximum number of results that can be accumulated by an actor event filter.`,
+		},
+		{
+			Name: "MaxFilterHeightRange",
+			Type: "uint64",
+
+			Comment: `MaxFilterHeightRange specifies the maximum range of heights that can be used in a filter (to avoid querying
+the entire chain)`,
+		},
+		{
+			Name: "DatabasePath",
+			Type: "string",
+
+			Comment: `DatabasePath is the full path to a sqlite database that will be used to index actor events to
+support the historic filter APIs. If the database does not exist it will be created. The directory containing
+the database must already exist and be writeable. If a relative path is provided here, sqlite treats it as
+relative to the CWD (current working directory).`,
+		},
+	},
+	"lotus_config.FaultReporterConfig": []DocField{
+		{
+			Name: "EnableConsensusFaultReporter",
+			Type: "bool",
+
+			Comment: `EnableConsensusFaultReporter controls whether the node will monitor and
+report consensus faults. When enabled, the node will watch for malicious
+behaviors like double-mining and parent grinding, and submit reports to the
+network. This can earn reporter rewards, but is not guaranteed. Nodes should
+enable fault reporting with care, as it may increase resource usage, and may
+generate gas fees without earning rewards.`,
+		},
+		{
+			Name: "ConsensusFaultReporterDataDir",
+			Type: "string",
+
+			Comment: `ConsensusFaultReporterDataDir is the path where fault reporter state will be
+persisted. This directory should have adequate space and permissions for the
+node process.`,
+		},
+		{
+			Name: "ConsensusFaultReporterAddress",
+			Type: "string",
+
+			Comment: `ConsensusFaultReporterAddress is the wallet address used for submitting
+ReportConsensusFault messages. It will pay for gas fees, and receive any
+rewards. This address should have adequate funds to cover gas fees.`,
+		},
+	},
 	"lotus_config.FeeConfig": []DocField{
 		{
 			Name: "DefaultMaxFee",
 			Type: "types.FIL",
+
+			Comment: ``,
+		},
+	},
+	"lotus_config.FevmConfig": []DocField{
+		{
+			Name: "EnableEthRPC",
+			Type: "bool",
+
+			Comment: `EnableEthRPC enables eth_ rpc, and enables storing a mapping of eth transaction hashes to filecoin message Cids.
+This will also enable the RealTimeFilterAPI and HistoricFilterAPI by default, but they can be disabled by config options above.`,
+		},
+		{
+			Name: "EthTxHashMappingLifetimeDays",
+			Type: "int",
+
+			Comment: `EthTxHashMappingLifetimeDays the transaction hash lookup database will delete mappings that have been stored for more than x days
+Set to 0 to keep all mappings`,
+		},
+		{
+			Name: "Events",
+			Type: "Events",
 
 			Comment: ``,
 		},
@@ -838,6 +1339,39 @@ see https://lotus.filecoin.io/storage-providers/advanced-configurations/market/#
 			Type: "Chainstore",
 
 			Comment: ``,
+		},
+		{
+			Name: "Cluster",
+			Type: "UserRaftConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "Fevm",
+			Type: "FevmConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "Index",
+			Type: "IndexConfig",
+
+			Comment: ``,
+		},
+		{
+			Name: "FaultReporter",
+			Type: "FaultReporterConfig",
+
+			Comment: ``,
+		},
+	},
+	"lotus_config.IndexConfig": []DocField{
+		{
+			Name: "EnableMsgIndex",
+			Type: "bool",
+
+			Comment: `EXPERIMENTAL FEATURE. USE WITH CAUTION
+EnableMsgIndex enables indexing of messages on chain.`,
 		},
 	},
 	"lotus_config.IndexProviderConfig": []DocField{
@@ -1099,6 +1633,24 @@ over the worker address if this flag is set.`,
 'lotus-miner proving compute window-post 0'`,
 		},
 		{
+			Name: "SingleCheckTimeout",
+			Type: "Duration",
+
+			Comment: `WARNING: Setting this value too low risks in sectors being skipped even though they are accessible, just reading the
+test challenge took longer than this timeout
+WARNING: Setting this value too high risks missing PoSt deadline in case IO operations related to this sector are
+blocked (e.g. in case of disconnected NFS mount)`,
+		},
+		{
+			Name: "PartitionCheckTimeout",
+			Type: "Duration",
+
+			Comment: `WARNING: Setting this value too low risks in sectors being skipped even though they are accessible, just reading the
+test challenge took longer than this timeout
+WARNING: Setting this value too high risks missing PoSt deadline in case IO operations related to this partition are
+blocked or slow`,
+		},
+		{
 			Name: "DisableBuiltinWindowPoSt",
 			Type: "bool",
 
@@ -1118,6 +1670,12 @@ Before enabling this option, make sure your PoSt workers work correctly.`,
 
 			Comment: `After changing this option, confirm that the new value works in your setup by invoking
 'lotus-miner proving compute window-post 0'`,
+		},
+		{
+			Name: "//",
+			Type: "//",
+
+			Comment: `A single partition may contain up to 2349 32GiB sectors, or 2300 64GiB sectors.`,
 		},
 		{
 			Name: "MaxPartitionsPerPoStMessage",
@@ -1172,6 +1730,35 @@ Type: Array of multiaddress peerinfo strings, must include peerid (/p2p/12D3K...
 			Type: "string",
 
 			Comment: ``,
+		},
+		{
+			Name: "JsonTracer",
+			Type: "string",
+
+			Comment: `Path to file that will be used to output tracer content in JSON format.
+If present tracer will save data to defined file.
+Format: file path`,
+		},
+		{
+			Name: "ElasticSearchTracer",
+			Type: "string",
+
+			Comment: `Connection string for elasticsearch instance.
+If present tracer will save data to elasticsearch.
+Format: https://<username>:<password>@<elasticsearch_url>:<port>/`,
+		},
+		{
+			Name: "ElasticSearchIndex",
+			Type: "string",
+
+			Comment: `Name of elasticsearch index that will be used to save tracer data.
+This property is used only if ElasticSearchTracer propery is set.`,
+		},
+		{
+			Name: "TracerSourceAuth",
+			Type: "string",
+
+			Comment: `Auth token that will be passed with logs to elasticsearch - used for weighted peers score.`,
 		},
 	},
 	"lotus_config.RetrievalPricing": []DocField{
@@ -1308,7 +1895,7 @@ If you see stuck Finalize tasks after enabling this setting, check
 		},
 		{
 			Name: "ResourceFiltering",
-			Type: "sealer.ResourceFilteringStrategy",
+			Type: "ResourceFilteringStrategy",
 
 			Comment: `ResourceFiltering instructs the system which resource filtering strategy
 to use when evaluating tasks against this worker. An empty value defaults
@@ -1364,8 +1951,7 @@ required to have expiration of at least the soonest-ending deal`,
 			Name: "MinTargetUpgradeSectorExpiration",
 			Type: "uint64",
 
-			Comment: `Setting this to a high value (for example to maximum deal duration - 1555200) will disable selection based on
-initial pledge - upgrade sectors will always be chosen based on longest expiration`,
+			Comment: `DEPRECATED: Target expiration is no longer used`,
 		},
 		{
 			Name: "CommittedCapacitySectorLifetime",
@@ -1373,7 +1959,7 @@ initial pledge - upgrade sectors will always be chosen based on longest expirati
 
 			Comment: `CommittedCapacitySectorLifetime is the duration a Committed Capacity (CC) sector will
 live before it must be extended or converted into sector containing deals before it is
-terminated. Value must be between 180-540 days inclusive`,
+terminated. Value must be between 180-1278 days (1278 in nv21, 540 before nv21).`,
 		},
 		{
 			Name: "WaitDealsDelay",
@@ -1428,12 +2014,6 @@ This is useful for forcing all deals to be assigned as snap deals to sectors mar
 			Comment: `Don't send collateral with messages even if there is no available balance in the miner actor`,
 		},
 		{
-			Name: "BatchPreCommits",
-			Type: "bool",
-
-			Comment: `enable / disable precommit batching (takes effect after nv13)`,
-		},
-		{
 			Name: "MaxPreCommitBatch",
 			Type: "int",
 
@@ -1486,7 +2066,8 @@ This is useful for forcing all deals to be assigned as snap deals to sectors mar
 			Type: "types.FIL",
 
 			Comment: `network BaseFee below which to stop doing precommit batching, instead
-sending precommit messages to the chain individually`,
+sending precommit messages to the chain individually. When the basefee is
+below this threshold, precommit messages will get sent out immediately.`,
 		},
 		{
 			Name: "AggregateAboveBaseFee",
@@ -1494,6 +2075,16 @@ sending precommit messages to the chain individually`,
 
 			Comment: `network BaseFee below which to stop doing commit aggregation, instead
 submitting proofs to the chain individually`,
+		},
+		{
+			Name: "MaxSectorProveCommitsSubmittedPerEpoch",
+			Type: "uint64",
+
+			Comment: `When submitting several sector prove commit messages simultaneously, this option allows you to
+stagger the number of prove commits submitted per epoch
+This is done because gas estimates for ProveCommits are non deterministic and increasing as a large
+number of sectors get committed within the same epoch resulting in occasionally failed msgs.
+Submitting a smaller number of prove commits per epoch would reduce the possibility of failed msgs`,
 		},
 		{
 			Name: "TerminateBatchMax",
@@ -1513,6 +2104,12 @@ submitting proofs to the chain individually`,
 
 			Comment: ``,
 		},
+		{
+			Name: "UseSyntheticPoRep",
+			Type: "bool",
+
+			Comment: `UseSyntheticPoRep, when set to true, will reduce the amount of cache data held on disk after the completion of PreCommit 2 to 11GiB.`,
+		},
 	},
 	"lotus_config.Splitstore": []DocField{
 		{
@@ -1520,7 +2117,7 @@ submitting proofs to the chain individually`,
 			Type: "string",
 
 			Comment: `ColdStoreType specifies the type of the coldstore.
-It can be "universal" (default) or "discard" for discarding cold blocks.`,
+It can be "messages" (default) to store only messages, "universal" to store all chain state or "discard" for discarding cold blocks.`,
 		},
 		{
 			Name: "HotStoreType",
@@ -1552,28 +2149,33 @@ A value of 0 disables, while a value 1 will do full GC in every compaction.
 Default is 20 (about once a week).`,
 		},
 		{
-			Name: "EnableColdStoreAutoPrune",
-			Type: "bool",
-
-			Comment: `EnableColdStoreAutoPrune turns on compaction of the cold store i.e. pruning
-where hotstore compaction occurs every finality epochs pruning happens every 3 finalities
-Default is false`,
-		},
-		{
-			Name: "ColdStoreFullGCFrequency",
+			Name: "HotStoreMaxSpaceTarget",
 			Type: "uint64",
 
-			Comment: `ColdStoreFullGCFrequency specifies how often to performa a full (moving) GC on the coldstore.
-Only applies if auto prune is enabled.  A value of 0 disables while a value of 1 will do
-full GC in every prune.
-Default is 7 (about once every a week)`,
+			Comment: `HotStoreMaxSpaceTarget sets a target max disk size for the hotstore. Splitstore GC
+will run moving GC if disk utilization gets within a threshold (150 GB) of the target.
+Splitstore GC will NOT run moving GC if the total size of the move would get
+within 50 GB of the target, and instead will run a more aggressive online GC.
+If both HotStoreFullGCFrequency and HotStoreMaxSpaceTarget are set then splitstore
+GC will trigger moving GC if either configuration condition is met.
+A reasonable minimum is 2x fully GCed hotstore size + 50 G buffer.
+At this minimum size moving GC happens every time, any smaller and moving GC won't
+be able to run. In spring 2023 this minimum is ~550 GB.`,
 		},
 		{
-			Name: "ColdStoreRetention",
-			Type: "int64",
+			Name: "HotStoreMaxSpaceThreshold",
+			Type: "uint64",
 
-			Comment: `ColdStoreRetention specifies the retention policy for data reachable from the chain, in
-finalities beyond the compaction boundary, default is 0, -1 retains everything`,
+			Comment: `When HotStoreMaxSpaceTarget is set Moving GC will be triggered when total moving size
+exceeds HotstoreMaxSpaceTarget - HotstoreMaxSpaceThreshold`,
+		},
+		{
+			Name: "HotstoreMaxSpaceSafetyBuffer",
+			Type: "uint64",
+
+			Comment: `Safety buffer to prevent moving GC from overflowing disk when HotStoreMaxSpaceTarget
+is set.  Moving GC will not occur when total moving size exceeds
+HotstoreMaxSpaceTarget - HotstoreMaxSpaceSafetyBuffer`,
 		},
 	},
 	"lotus_config.StorageMiner": []DocField{
@@ -1630,6 +2232,68 @@ finalities beyond the compaction boundary, default is 0, -1 retains everything`,
 			Type: "DAGStoreConfig",
 
 			Comment: ``,
+		},
+	},
+	"lotus_config.UserRaftConfig": []DocField{
+		{
+			Name: "ClusterModeEnabled",
+			Type: "bool",
+
+			Comment: `EXPERIMENTAL. config to enabled node cluster with raft consensus`,
+		},
+		{
+			Name: "DataFolder",
+			Type: "string",
+
+			Comment: `A folder to store Raft's data.`,
+		},
+		{
+			Name: "InitPeersetMultiAddr",
+			Type: "[]string",
+
+			Comment: `InitPeersetMultiAddr provides the list of initial cluster peers for new Raft
+peers (with no prior state). It is ignored when Raft was already
+initialized or when starting in staging mode.`,
+		},
+		{
+			Name: "WaitForLeaderTimeout",
+			Type: "Duration",
+
+			Comment: `LeaderTimeout specifies how long to wait for a leader before
+failing an operation.`,
+		},
+		{
+			Name: "NetworkTimeout",
+			Type: "Duration",
+
+			Comment: `NetworkTimeout specifies how long before a Raft network
+operation is timed out`,
+		},
+		{
+			Name: "CommitRetries",
+			Type: "int",
+
+			Comment: `CommitRetries specifies how many times we retry a failed commit until
+we give up.`,
+		},
+		{
+			Name: "CommitRetryDelay",
+			Type: "Duration",
+
+			Comment: `How long to wait between retries`,
+		},
+		{
+			Name: "BackupsRotate",
+			Type: "int",
+
+			Comment: `BackupsRotate specifies the maximum number of Raft's DataFolder
+copies that we keep as backups (renaming) after cleanup.`,
+		},
+		{
+			Name: "Tracing",
+			Type: "bool",
+
+			Comment: `Tracing enables propagation of contexts across binary boundaries.`,
 		},
 	},
 	"lotus_config.Wallet": []DocField{

@@ -1,15 +1,16 @@
 version: 2.1
 orbs:
-  go: gotest/tools@0.0.13
+  golang: circleci/go@1.7.3
+  go: gotest/tools@0.0.14
 
 executors:
   golang:
     docker:
-      - image: cimg/go:1.18.6
+      - image: cimg/go:1.20.7
     resource_class: 2xlarge
   ubuntu:
     docker:
-      - image: ubuntu:20.04
+      - image: ubuntu:22.04
 
 commands:
   install-deps:
@@ -83,6 +84,19 @@ jobs:
           paths:
             - linux
 
+  lid-docker-compose:
+    description: 'Run LID integration tests'
+    machine:
+      image: ubuntu-2204:2023.07.2
+      resource_class: xlarge
+    steps:
+      - checkout
+      - run:
+          name: local index directory docker compose tests
+          command: |
+            set -x
+            make test-lid
+
   test:
     description: |
       Run go tests
@@ -98,6 +112,10 @@ jobs:
         type: string
         default: "./..."
         description: Import paths of packages to be tested.
+      cwd:
+        type: string
+        default: "."
+        description: Directory in which to run the test command
       suite:
         type: string
         default: unit
@@ -110,9 +128,16 @@ jobs:
           command: make boostci
           no_output_timeout: 30m
       - download-params
+      # Note: setup_remote_docker takes about 10s and it's only needed for
+      # local index directory tests so it may be worth refactoring so that it's
+      # only included for local index directory
+      - setup_remote_docker:
+          version: 20.10.23
+          docker_layer_caching: true
       - run:
           name: go test
           command: |
+            cd << parameters.cwd >>
             go test \
               << parameters.go-test-flags >> \
               << parameters.target >>
@@ -121,17 +146,15 @@ jobs:
   build-macos:
     description: build darwin boost binary
     macos:
-      xcode: "12.5.1"
+      xcode: "15.0.0"
     working_directory: ~/go/src/github.com/filecoin-project/boost
+    resource_class: macos.m1.medium.gen1
     steps:
       - prepare:
           linux: false
           darwin: true
-      - run:
-          name: Install go
-          command: |
-            curl -O https://dl.google.com/go/go1.17.2.darwin-amd64.pkg && \
-            sudo installer -pkg go1.17.2.darwin-amd64.pkg -target /
+      - golang/install:
+          version: "1.20.7"
       - run:
           name: Install pkg-config
           command: HOMEBREW_NO_AUTO_UPDATE=1 brew install pkg-config
@@ -230,7 +253,7 @@ jobs:
         default: golang
       golangci-lint-version:
         type: string
-        default: 1.46.2
+        default: 1.52.2
       concurrency:
         type: string
         default: '2'
@@ -279,8 +302,8 @@ workflows:
       - build-macos:
           filters:
             branches:
-              ignore:
-                - /.*/
+              only:
+                - /ci\/.*/
             tags:
               only:
                 - /^v\d+\.\d+\.\d+(-rc\d+)?$/
@@ -301,11 +324,53 @@ workflows:
           target: "./itests/markets_v1_deal_test.go"
 
       - test:
+          name: test-itest-markets_v1_identity_cid
+          suite: itest-markets_v1_identity_cid
+          target: "./itests/markets_v1_identity_cid_test.go"
+
+      - test:
           name: test-itest-markets_v1_offline_deal
           suite: itest-markets_v1_offline_deal
           target: "./itests/markets_v1_offline_deal_test.go"
 
       - test:
+          name: test-itest-markets_v1_retrieval
+          suite: itest-markets_v1_retrieval
+          target: "./itests/markets_v1_retrieval_test.go"
+
+      - test:
+          name: test-itest-disabled_markets_v1_deal
+          suite: itest-disabled_markets_v1_deal
+          target: "./itests/disabled_markets_v1_deal_test.go"
+
+      #- test:
+          #name: test-itest-direct_deal
+          #suite: itest-direct_deal
+          #target: "./itests/ddo_test.go"
+
+      - test:
           name: test-all
           suite: all
-          target: "`go list ./... | grep -v boost/itests`"
+          target: "`go list ./... | grep -v boost/itests | grep -v cmd/booster-http | grep -v cmd/booster-bitswap`"
+
+      - test:
+          name: test-itest-ipni
+          suite: itest-ipni
+          target: "./itests/ipni_publish_test.go"
+
+      - test:
+          name: test-itest-multiminer-graphsync
+          suite: itest-multiminer-graphsync
+          target: "./itests/multiminer_retrieval_graphsync_test.go"
+
+      - test:
+          name: test-booster-http
+          suite: booster-http
+          target: "./cmd/booster-http"
+
+      - test:
+          name: test-booster-bitswap
+          suite: booster-bitswap
+          target: "./cmd/booster-bitswap"
+
+      - lid-docker-compose

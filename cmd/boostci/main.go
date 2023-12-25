@@ -1,17 +1,15 @@
 package main
 
 import (
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
-
-	llog "log"
 
 	"github.com/urfave/cli/v2"
 )
 
 func init() {
-	llog.SetOutput(ioutil.Discard)
+	log.SetOutput(io.Discard)
 }
 
 func main() {

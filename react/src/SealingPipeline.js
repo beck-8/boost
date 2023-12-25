@@ -17,7 +17,7 @@ export function SealingPipelinePage(props) {
 }
 
 function SealingPipelineContent(props) {
-    const {loading, error, data} = useQuery(SealingPipelineQuery, { pollInterval: 2000 })
+    const {loading, error, data} = useQuery(SealingPipelineQuery, { pollInterval: 10000 })
 
     if (loading) {
         return <div>Loading...</div>
@@ -162,9 +162,14 @@ function SealingType(props) {
 }
 
 function Workers(props) {
+    const workers = JSON.parse(JSON.stringify(props.workers)).sort((a, b) => {
+        if (a.Start > b.Start) return 1
+        if (a.Start < b.Start) return -1
+        return 0
+    })
     return <div className="workers">
         <div className="title">Workers</div>
-        {props.workers.length === 0 ? <div className="no-workers">No active jobs</div> : (
+        {workers.length === 0 ? <div className="no-workers">No active jobs</div> : (
             <table>
                 <tbody>
                 <tr>
@@ -173,7 +178,7 @@ function Workers(props) {
                     <th className="stage">Stage</th>
                     <th className="sector">Sector</th>
                 </tr>
-                {props.workers.map(worker => (
+                {workers.map(worker => (
                     <tr key={worker.ID+worker.Sector}>
                         <td className="start">{moment(worker.Start).format(dateFormat)}</td>
                         <td className="worker-id">{worker.ID}</td>
@@ -189,7 +194,7 @@ function Workers(props) {
 
 export function SealingPipelineMenuItem(props) {
     const {data} = useQuery(SealingPipelineQuery, {
-        pollInterval: 5000,
+        pollInterval: 10000,
         fetchPolicy: "network-only",
     })
 

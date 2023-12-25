@@ -24,6 +24,9 @@ type ProviderDealState struct {
 	// IsOffline is true for offline deals i.e. deals where the actual data to be stored by the SP is sent out of band
 	// and not via an online data transfer.
 	IsOffline bool
+	// CleanupData indicates whether to remove the data for a deal after the deal has been added to a sector.
+	// This is always true for online deals, and can be set as a flag for offline deals.
+	CleanupData bool
 
 	// ClientPeerID is the Clients libp2p Peer ID.
 	ClientPeerID peer.ID
@@ -58,6 +61,12 @@ type ProviderDealState struct {
 
 	// NBytesReceived is the number of bytes Received for this deal
 	NBytesReceived int64
+
+	// Keep unsealed copy of the data
+	FastRetrieval bool
+
+	//Announce deal to the IPNI(Index Provider)
+	AnnounceToIPNI bool
 }
 
 func (d *ProviderDealState) String() string {

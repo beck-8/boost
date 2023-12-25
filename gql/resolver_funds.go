@@ -3,9 +3,8 @@ package gql
 import (
 	"context"
 	"fmt"
-	"time"
-
 	gqltypes "github.com/filecoin-project/boost/gql/types"
+	smfunds "github.com/filecoin-project/boost/storagemarket/funds"
 	"github.com/graph-gophers/graphql-go"
 )
 
@@ -29,40 +28,25 @@ type funds struct {
 
 // query: funds: Funds
 func (r *resolver) Funds(ctx context.Context) (*funds, error) {
-	tagged, err := r.fundMgr.TotalTagged(ctx)
+	fnds, err := smfunds.GetStatus(ctx, r.fundMgr)
 	if err != nil {
-		return nil, fmt.Errorf("getting total tagged: %w", err)
-	}
-
-	balMkt, err := r.fundMgr.BalanceMarket(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting market balance: %w", err)
-	}
-
-	balPubMsg, err := r.fundMgr.BalancePublishMsg(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting publish message balance: %w", err)
-	}
-
-	balCollateral, err := r.fundMgr.BalanceDealCollateral(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting deal collateral balance: %w", err)
+		return nil, err
 	}
 
 	return &funds{
 		Escrow: fundsEscrow{
-			Tagged:    gqltypes.BigInt{Int: tagged.Collateral},
-			Available: gqltypes.BigInt{Int: balMkt.Available},
-			Locked:    gqltypes.BigInt{Int: balMkt.Locked},
+			Available: gqltypes.BigInt{Int: fnds.Escrow.Available},
+			Locked:    gqltypes.BigInt{Int: fnds.Escrow.Locked},
+			Tagged:    gqltypes.BigInt{Int: fnds.Escrow.Tagged},
 		},
 		Collateral: fundsWallet{
-			Address: r.fundMgr.AddressDealCollateral().String(),
-			Balance: gqltypes.BigInt{Int: balCollateral},
+			Address: fnds.Collateral.Address,
+			Balance: gqltypes.BigInt{Int: fnds.Collateral.Balance},
 		},
 		PubMsg: fundsWallet{
-			Address: r.fundMgr.AddressPublishMsg().String(),
-			Balance: gqltypes.BigInt{Int: balPubMsg},
-			Tagged:  gqltypes.BigInt{Int: tagged.PubMsg},
+			Address: fnds.PubMsg.Address,
+			Balance: gqltypes.BigInt{Int: fnds.PubMsg.Balance},
+			Tagged:  gqltypes.BigInt{Int: fnds.PubMsg.Tagged},
 		},
 	}, nil
 }
@@ -98,15 +82,9 @@ func (r *resolver) FundsLogs(ctx context.Context, args fundsLogsArgs) (*fundsLog
 		limit = int(*args.Limit.Value)
 	}
 
-	var cursor *time.Time
-	if args.Cursor != nil {
-		val := (*args.Cursor).Int64()
-		asTime := time.Unix(val/1000, (val%1000)*1e6)
-		cursor = &asTime
-	}
-
 	// Fetch one extra log so that we can check if there are more logs
 	// beyond the limit
+	cursor := bigIntToTime(args.Cursor)
 	logs, err := r.fundsDB.Logs(ctx, cursor, offset, limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("getting funds logs: %w", err)

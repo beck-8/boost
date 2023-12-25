@@ -12,19 +12,22 @@ import (
 	"testing"
 	"time"
 
+	gfm_storagemarket "github.com/filecoin-project/boost-gfm/storagemarket"
+	"github.com/filecoin-project/boost-gfm/storagemarket/impl/storedask"
 	"github.com/filecoin-project/boost/api"
 	boostclient "github.com/filecoin-project/boost/client"
 	"github.com/filecoin-project/boost/node"
 	"github.com/filecoin-project/boost/node/config"
 	"github.com/filecoin-project/boost/node/modules/dtypes"
+	"github.com/filecoin-project/boost/node/repo"
 	"github.com/filecoin-project/boost/storagemarket"
 	"github.com/filecoin-project/boost/storagemarket/types"
 	"github.com/filecoin-project/boost/storagemarket/types/dealcheckpoints"
 	types2 "github.com/filecoin-project/boost/transport/types"
 	"github.com/filecoin-project/go-address"
 	cborutil "github.com/filecoin-project/go-cbor-util"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
-	lotus_storagemarket "github.com/filecoin-project/go-fil-markets/storagemarket"
+	lotus_gfm_retrievalmarket "github.com/filecoin-project/go-fil-markets/retrievalmarket"
+	lotus_gfm_storagemarket "github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
 	"github.com/filecoin-project/go-state-types/builtin"
@@ -37,6 +40,7 @@ import (
 	"github.com/filecoin-project/lotus/chain/actors"
 	chaintypes "github.com/filecoin-project/lotus/chain/types"
 	ltypes "github.com/filecoin-project/lotus/chain/types"
+	"github.com/filecoin-project/lotus/gateway"
 	"github.com/filecoin-project/lotus/itests/kit"
 	lnode "github.com/filecoin-project/lotus/node"
 	lotus_config "github.com/filecoin-project/lotus/node/config"
@@ -45,29 +49,42 @@ import (
 	"github.com/filecoin-project/lotus/node/modules/lp2p"
 	lotus_repo "github.com/filecoin-project/lotus/node/repo"
 	"github.com/filecoin-project/lotus/storage/ctladdr"
-	"github.com/filecoin-project/lotus/storage/paths"
 	"github.com/filecoin-project/lotus/storage/pipeline/sealiface"
+	"github.com/filecoin-project/lotus/storage/sealer/storiface"
 	"github.com/google/uuid"
+	"github.com/ipfs/boxo/files"
+	dag "github.com/ipfs/boxo/ipld/merkledag"
+	dstest "github.com/ipfs/boxo/ipld/merkledag/test"
+	unixfile "github.com/ipfs/boxo/ipld/unixfs/file"
+	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
-	files "github.com/ipfs/go-ipfs-files"
-	ipld "github.com/ipfs/go-ipld-format"
+	ipldcbor "github.com/ipfs/go-ipld-cbor"
+	ipldformat "github.com/ipfs/go-ipld-format"
 	logging "github.com/ipfs/go-log/v2"
-	dag "github.com/ipfs/go-merkledag"
-	dstest "github.com/ipfs/go-merkledag/test"
-	unixfile "github.com/ipfs/go-unixfs/file"
 	"github.com/ipld/go-car"
+	"github.com/ipld/go-ipld-prime"
+	"github.com/ipld/go-ipld-prime/codec/dagjson"
+	"github.com/ipld/go-ipld-prime/datamodel"
+	"github.com/ipld/go-ipld-prime/traversal/selector"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/multiformats/go-multihash"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
 
 var Log = logging.Logger("boosttest")
 
+type TestFrameworkConfig struct {
+	Ensemble     *kit.Ensemble
+	EnableLegacy bool
+}
+
 type TestFramework struct {
-	ctx  context.Context
-	Stop func()
+	ctx    context.Context
+	Stop   func()
+	config *TestFrameworkConfig
 
 	HomeDir       string
 	Client        *boostclient.StorageClient
@@ -79,18 +96,37 @@ type TestFramework struct {
 	DefaultWallet address.Address
 }
 
-func NewTestFramework(ctx context.Context, t *testing.T) *TestFramework {
-	fullNode, miner := FullNodeAndMiner(t)
+type FrameworkOpts func(pc *TestFrameworkConfig)
 
+func EnableLegacyDeals(enable bool) FrameworkOpts {
+	return func(tmc *TestFrameworkConfig) {
+		tmc.EnableLegacy = enable
+	}
+}
+
+func WithEnsemble(e *kit.Ensemble) FrameworkOpts {
+	return func(tmc *TestFrameworkConfig) {
+		tmc.Ensemble = e
+	}
+}
+
+func NewTestFramework(ctx context.Context, t *testing.T, opts ...FrameworkOpts) *TestFramework {
+	fmc := &TestFrameworkConfig{}
+	for _, opt := range opts {
+		opt(fmc)
+	}
+
+	fullNode, miner := FullNodeAndMiner(t, fmc.Ensemble)
 	return &TestFramework{
 		ctx:        ctx,
+		config:     fmc,
 		HomeDir:    t.TempDir(),
 		FullNode:   fullNode,
 		LotusMiner: miner,
 	}
 }
 
-func FullNodeAndMiner(t *testing.T) (*kit.TestFullNode, *kit.TestMiner) {
+func FullNodeAndMiner(t *testing.T, ensemble *kit.Ensemble) (*kit.TestFullNode, *kit.TestMiner) {
 	// Set up a full node and a miner (without markets)
 	var fullNode kit.TestFullNode
 	var miner kit.TestMiner
@@ -112,7 +148,6 @@ func FullNodeAndMiner(t *testing.T) (*kit.TestFullNode, *kit.TestMiner) {
 					sc.MaxSealingSectorsForDeals = 3
 					sc.AlwaysKeepUnsealedCopy = true
 					sc.WaitDealsDelay = time.Hour
-					sc.BatchPreCommits = false
 					sc.AggregateCommits = false
 
 					return sc, nil
@@ -123,28 +158,43 @@ func FullNodeAndMiner(t *testing.T) (*kit.TestFullNode, *kit.TestMiner) {
 	fnOpts := []kit.NodeOpt{
 		kit.ConstructorOpts(
 			lnode.Override(new(lp2p.RawHost), func() (host.Host, error) {
-				return libp2p.New()
+				return libp2p.New(libp2p.DefaultTransports)
 			}),
 		),
 		kit.ThroughRPC(),
 		secSizeOpt,
 	}
 
-	eOpts := []kit.EnsembleOpt{
-		//TODO: at the moment we are not mocking proofs
-		//maybe enable this in the future to speed up tests further
+	defaultEnsemble := ensemble == nil
+	if defaultEnsemble {
+		eOpts := []kit.EnsembleOpt{
+			//TODO: at the moment we are not mocking proofs
+			//maybe enable this in the future to speed up tests further
 
-		//kit.MockProofs(),
+			//kit.MockProofs(),
+		}
+		ensemble = kit.NewEnsemble(t, eOpts...)
 	}
 
-	blockTime := 100 * time.Millisecond
-	ens := kit.NewEnsemble(t, eOpts...).FullNode(&fullNode, fnOpts...).Miner(&miner, &fullNode, minerOpts...).Start()
-	ens.BeginMining(blockTime)
+	ensemble.FullNode(&fullNode, fnOpts...).Miner(&miner, &fullNode, minerOpts...)
+	if defaultEnsemble {
+		ensemble.Start()
+		blockTime := 100 * time.Millisecond
+		ensemble.BeginMining(blockTime)
+	}
 
 	return &fullNode, &miner
 }
 
-func (f *TestFramework) Start() error {
+type ConfigOpt func(cfg *config.Boost)
+
+func WithMaxStagingDealsBytes(maxBytes int64) ConfigOpt {
+	return func(cfg *config.Boost) {
+		cfg.Dealmaking.MaxStagingDealsBytes = maxBytes
+	}
+}
+
+func (f *TestFramework) Start(opts ...ConfigOpt) error {
 	lapi.RunningNodeType = lapi.NodeMiner
 
 	fullnodeApi := f.FullNode
@@ -179,9 +229,11 @@ func (f *TestFramework) Start() error {
 		wg.Done()
 	}()
 
-	// Create a wallet for publish storage deals with some funds
-	wg.Add(1)
+	// Create wallets for publish storage deals and deal collateral with
+	// some funds
+	wg.Add(2)
 	var psdWalletAddr address.Address
+	var dealCollatAddr address.Address
 	go func() {
 		Log.Info("Creating publish storage deals wallet")
 		psdWalletAddr, _ = fullnodeApi.WalletNew(f.ctx, chaintypes.KTBLS)
@@ -189,6 +241,15 @@ func (f *TestFramework) Start() error {
 		amt := abi.NewTokenAmount(1e18)
 		_ = sendFunds(f.ctx, fullnodeApi, psdWalletAddr, amt)
 		Log.Infof("Created publish storage deals wallet %s with %d attoFil", psdWalletAddr, amt)
+		wg.Done()
+	}()
+	go func() {
+		Log.Info("Creating deal collateral wallet")
+		dealCollatAddr, _ = fullnodeApi.WalletNew(f.ctx, chaintypes.KTBLS)
+
+		amt := abi.NewTokenAmount(1e18)
+		_ = sendFunds(f.ctx, fullnodeApi, dealCollatAddr, amt)
+		Log.Infof("Created deal collateral wallet %s with %d attoFil", dealCollatAddr, amt)
 		wg.Done()
 	}()
 	wg.Wait()
@@ -218,7 +279,7 @@ func (f *TestFramework) Start() error {
 	// Create an in-memory repo
 	r := lotus_repo.NewMemory(nil)
 
-	lr, err := r.Lock(node.Boost)
+	lr, err := r.Lock(repo.Boost)
 	if err != nil {
 		return err
 	}
@@ -226,7 +287,7 @@ func (f *TestFramework) Start() error {
 	// The in-memory repo implementation assumes that its being used to test
 	// a miner, which has storage configuration.
 	// Boost doesn't have storage configuration so clear the storage config.
-	if err := lr.SetStorage(func(sc *paths.StorageConfig) {
+	if err := lr.SetStorage(func(sc *storiface.StorageConfig) {
 		sc.StoragePaths = nil
 	}); err != nil {
 		return fmt.Errorf("set storage config: %w", err)
@@ -250,11 +311,10 @@ func (f *TestFramework) Start() error {
 		return err
 	}
 
-	token, err := f.LotusMiner.AuthNew(f.ctx, api.AllPermissions)
+	apiInfo, err := f.LotusMinerApiInfo()
 	if err != nil {
 		return err
 	}
-	apiInfo := fmt.Sprintf("%s:%s", token, f.LotusMiner.ListenAddr)
 	Log.Debugf("miner API info: %s", apiInfo)
 
 	cfg, ok := c.(*config.Boost)
@@ -265,6 +325,7 @@ func (f *TestFramework) Start() error {
 	cfg.SealerApiInfo = apiInfo
 	cfg.Wallets.Miner = minerAddr.String()
 	cfg.Wallets.PublishStorageDeals = psdWalletAddr.String()
+	cfg.Wallets.DealCollateral = dealCollatAddr.String()
 	cfg.LotusDealmaking.MaxDealsPerPublishMsg = 1
 	cfg.LotusDealmaking.PublishMsgPeriod = lotus_config.Duration(0)
 	val, err := ltypes.ParseFIL("0.1 FIL")
@@ -277,6 +338,18 @@ func (f *TestFramework) Start() error {
 	// No transfers will start until the first stall check period has elapsed
 	cfg.Dealmaking.HttpTransferStallCheckPeriod = config.Duration(100 * time.Millisecond)
 	cfg.Storage.ParallelFetchLimit = 10
+	if f.config.EnableLegacy {
+		cfg.Dealmaking.EnableLegacyStorageDeals = true
+	}
+
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	cfg.Dealmaking.ExpectedSealDuration = 10
+
+	// Enable LID with leveldb
+	cfg.LocalIndexDirectory.Leveldb.Enabled = true
 
 	err = lr.SetConfig(func(raw interface{}) {
 		rcfg := raw.(*config.Boost)
@@ -300,6 +373,7 @@ func (f *TestFramework) Start() error {
 		node.Base(),
 		node.Repo(r),
 		node.Override(new(v1api.FullNode), fullnodeApi),
+		node.Override(new(*gateway.EthSubHandler), fullnodeApi.EthSubRouter),
 
 		node.Override(new(*ctladdr.AddressSelector), modules.AddressSelector(&lotus_config.MinerAddressConfig{
 			DealPublishControl: []string{
@@ -409,6 +483,23 @@ func (f *TestFramework) Start() error {
 	return nil
 }
 
+func (f *TestFramework) LotusMinerApiInfo() (string, error) {
+	token, err := f.LotusMiner.AuthNew(f.ctx, api.AllPermissions)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s:%s", token, f.LotusMiner.ListenAddr), nil
+}
+
+func (f *TestFramework) LotusFullNodeApiInfo() (string, error) {
+	token, err := f.FullNode.AuthNew(f.ctx, api.AllPermissions)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s:%s", token, f.FullNode.ListenAddr), nil
+}
+
 // Add funds escrow in StorageMarketActor for both client and provider
 func (f *TestFramework) AddClientProviderBalance(bal abi.TokenAmount) error {
 	var errgp errgroup.Group
@@ -477,8 +568,13 @@ func (f *TestFramework) WaitForDealAddedToSector(dealUuid uuid.UUID) error {
 	}
 }
 
-func (f *TestFramework) MakeDummyDeal(dealUuid uuid.UUID, carFilepath string, rootCid cid.Cid, url string, isOffline bool) (*api.ProviderDealRejectionInfo, error) {
-	cidAndSize, err := storagemarket.GenerateCommP(carFilepath)
+type DealResult struct {
+	DealParams types.DealParams
+	Result     *api.ProviderDealRejectionInfo
+}
+
+func (f *TestFramework) MakeDummyDeal(dealUuid uuid.UUID, carFilepath string, rootCid cid.Cid, url string, isOffline bool) (*DealResult, error) {
+	cidAndSize, err := storagemarket.GenerateCommPLocally(carFilepath)
 	if err != nil {
 		return nil, err
 	}
@@ -492,6 +588,7 @@ func (f *TestFramework) MakeDummyDeal(dealUuid uuid.UUID, carFilepath string, ro
 	if err != nil {
 		return nil, err
 	}
+	price := big.Div(big.Mul(storedask.DefaultPrice, abi.NewTokenAmount(int64(cidAndSize.Size))), abi.NewTokenAmount(1<<30))
 	proposal := market.DealProposal{
 		PieceCID:             cidAndSize.PieceCID,
 		PieceSize:            cidAndSize.Size,
@@ -501,7 +598,7 @@ func (f *TestFramework) MakeDummyDeal(dealUuid uuid.UUID, carFilepath string, ro
 		Label:                l,
 		StartEpoch:           startEpoch,
 		EndEpoch:             startEpoch + market.DealMinDuration,
-		StoragePricePerEpoch: abi.NewTokenAmount(2000000),
+		StoragePricePerEpoch: price,
 		ProviderCollateral:   abi.NewTokenAmount(0),
 		ClientCollateral:     abi.NewTokenAmount(0),
 	}
@@ -541,9 +638,15 @@ func (f *TestFramework) MakeDummyDeal(dealUuid uuid.UUID, carFilepath string, ro
 			Params: transferParamsJSON,
 			Size:   uint64(carFileinfo.Size()),
 		},
+		RemoveUnsealedCopy: false,
+		SkipIPNIAnnounce:   false,
 	}
 
-	return f.Client.StorageDeal(f.ctx, dealParams, peerID)
+	res, err := f.Client.StorageDeal(f.ctx, dealParams, peerID)
+	return &DealResult{
+		DealParams: dealParams,
+		Result:     res,
+	}, err
 }
 
 func (f *TestFramework) signProposal(addr address.Address, proposal *market.DealProposal) (*market.ClientDealProposal, error) {
@@ -565,7 +668,7 @@ func (f *TestFramework) signProposal(addr address.Address, proposal *market.Deal
 
 func (f *TestFramework) DefaultMarketsV1DealParams() lapi.StartDealParams {
 	return lapi.StartDealParams{
-		Data:              &lotus_storagemarket.DataRef{TransferType: lotus_storagemarket.TTGraphsync},
+		Data:              &lotus_gfm_storagemarket.DataRef{TransferType: gfm_storagemarket.TTGraphsync},
 		EpochPrice:        ltypes.NewInt(62500000), // minimum asking price
 		MinBlocksDuration: uint64(lbuild.MinDealDuration),
 		Miner:             f.MinerAddr,
@@ -643,14 +746,14 @@ func (f *TestFramework) WaitDealSealed(ctx context.Context, deal *cid.Cid) error
 		}
 
 		switch di.State {
-		case lotus_storagemarket.StorageDealAwaitingPreCommit, lotus_storagemarket.StorageDealSealing:
-		case lotus_storagemarket.StorageDealProposalRejected:
+		case gfm_storagemarket.StorageDealAwaitingPreCommit, gfm_storagemarket.StorageDealSealing:
+		case gfm_storagemarket.StorageDealProposalRejected:
 			return errors.New("deal rejected")
-		case lotus_storagemarket.StorageDealFailing:
+		case gfm_storagemarket.StorageDealFailing:
 			return errors.New("deal failed")
-		case lotus_storagemarket.StorageDealError:
+		case gfm_storagemarket.StorageDealError:
 			return fmt.Errorf("deal errored: %s", di.Message)
-		case lotus_storagemarket.StorageDealActive:
+		case gfm_storagemarket.StorageDealActive:
 			return nil
 		}
 
@@ -658,7 +761,7 @@ func (f *TestFramework) WaitDealSealed(ctx context.Context, deal *cid.Cid) error
 	}
 }
 
-func (f *TestFramework) Retrieve(ctx context.Context, t *testing.T, deal *cid.Cid, root cid.Cid, carExport bool) string {
+func (f *TestFramework) Retrieve(ctx context.Context, t *testing.T, deal *cid.Cid, root cid.Cid, extractCar bool, selectorNode datamodel.Node) string {
 	// perform retrieval.
 	info, err := f.FullNode.ClientGetDealInfo(ctx, *deal)
 	require.NoError(t, err)
@@ -667,7 +770,55 @@ func (f *TestFramework) Retrieve(ctx context.Context, t *testing.T, deal *cid.Ci
 	require.NoError(t, err)
 	require.NotEmpty(t, offers, "no offers")
 
+	return f.retrieve(ctx, t, offers[0], extractCar, selectorNode)
+}
+
+func (f *TestFramework) ExtractFileFromCAR(ctx context.Context, t *testing.T, file *os.File) string {
+	bserv := dstest.Bserv()
+	ch, err := car.LoadCar(ctx, bserv.Blockstore(), file)
+	require.NoError(t, err)
+
+	var b blocks.Block
+	if ch.Roots[0].Prefix().MhType == multihash.IDENTITY {
+		mh, err := multihash.Decode(ch.Roots[0].Hash())
+		require.NoError(t, err)
+		b, err = blocks.NewBlockWithCid(mh.Digest, ch.Roots[0])
+		require.NoError(t, err)
+	} else {
+		b, err = bserv.GetBlock(ctx, ch.Roots[0])
+		require.NoError(t, err)
+	}
+
+	reg := ipldformat.Registry{}
+	reg.Register(cid.DagProtobuf, dag.DecodeProtobufBlock)
+	reg.Register(cid.DagCBOR, ipldcbor.DecodeBlock)
+	reg.Register(cid.Raw, dag.DecodeRawBlock)
+
+	nd, err := reg.Decode(b)
+	require.NoError(t, err)
+
+	dserv := dag.NewDAGService(bserv)
+	fil, err := unixfile.NewUnixfsFile(ctx, dserv, nd)
+	require.NoError(t, err)
+
+	tmpFile := path.Join(t.TempDir(), fmt.Sprintf("file-in-car-%d", rand.Uint32()))
+	err = files.WriteTo(fil, tmpFile)
+	require.NoError(t, err)
+
+	return tmpFile
+}
+
+func (f *TestFramework) RetrieveDirect(ctx context.Context, t *testing.T, root cid.Cid, pieceCid *cid.Cid, extractCar bool, selectorNode datamodel.Node) string {
+	offer, err := f.FullNode.ClientMinerQueryOffer(ctx, f.MinerAddr, root, pieceCid)
+	require.NoError(t, err)
+
+	return f.retrieve(ctx, t, offer, extractCar, selectorNode)
+}
+
+func (f *TestFramework) retrieve(ctx context.Context, t *testing.T, offer lapi.QueryOffer, extractCar bool, selectorNode datamodel.Node) string {
 	p := path.Join(t.TempDir(), "ret-car-"+t.Name())
+	err := os.MkdirAll(path.Dir(p), 0755)
+	require.NoError(t, err)
 	carFile, err := os.Create(p)
 	require.NoError(t, err)
 
@@ -680,7 +831,17 @@ func (f *TestFramework) Retrieve(ctx context.Context, t *testing.T, deal *cid.Ci
 	updates, err := f.FullNode.ClientGetRetrievalUpdates(updatesCtx)
 	require.NoError(t, err)
 
-	retrievalRes, err := f.FullNode.ClientRetrieve(ctx, offers[0].Order(caddr))
+	order := offer.Order(caddr)
+	if selectorNode != nil {
+		_, err := selector.CompileSelector(selectorNode)
+		require.NoError(t, err)
+		jsonSelector, err := ipld.Encode(selectorNode, dagjson.Encode)
+		require.NoError(t, err)
+		sel := lapi.Selector(jsonSelector)
+		order.DataSelector = &sel
+	}
+
+	retrievalRes, err := f.FullNode.ClientRetrieve(ctx, order)
 	require.NoError(t, err)
 consumeEvents:
 	for {
@@ -694,13 +855,13 @@ consumeEvents:
 			}
 		}
 		switch evt.Status {
-		case retrievalmarket.DealStatusCompleted:
+		case lotus_gfm_retrievalmarket.DealStatusCompleted:
 			break consumeEvents
-		case retrievalmarket.DealStatusRejected:
+		case lotus_gfm_retrievalmarket.DealStatusRejected:
 			t.Fatalf("Retrieval Proposal Rejected: %s", evt.Message)
 		case
-			retrievalmarket.DealStatusDealNotFound,
-			retrievalmarket.DealStatusErrored:
+			lotus_gfm_retrievalmarket.DealStatusDealNotFound,
+			lotus_gfm_retrievalmarket.DealStatusErrored:
 			t.Fatalf("Retrieval Error: %s", evt.Message)
 		}
 	}
@@ -708,40 +869,18 @@ consumeEvents:
 
 	require.NoError(t, f.FullNode.ClientExport(ctx,
 		lapi.ExportRef{
-			Root:   root,
+			Root:   offer.Root,
 			DealID: retrievalRes.DealID,
 		},
 		lapi.FileRef{
 			Path:  carFile.Name(),
-			IsCAR: carExport,
+			IsCAR: true,
 		}))
 
 	ret := carFile.Name()
-	if carExport {
+	if extractCar {
 		ret = f.ExtractFileFromCAR(ctx, t, carFile)
 	}
 
 	return ret
-}
-
-func (f *TestFramework) ExtractFileFromCAR(ctx context.Context, t *testing.T, file *os.File) string {
-	bserv := dstest.Bserv()
-	ch, err := car.LoadCar(ctx, bserv.Blockstore(), file)
-	require.NoError(t, err)
-
-	b, err := bserv.GetBlock(ctx, ch.Roots[0])
-	require.NoError(t, err)
-
-	nd, err := ipld.Decode(b)
-	require.NoError(t, err)
-
-	dserv := dag.NewDAGService(bserv)
-	fil, err := unixfile.NewUnixfsFile(ctx, dserv, nd)
-	require.NoError(t, err)
-
-	tmpFile := path.Join(t.TempDir(), fmt.Sprintf("file-in-car-%d", rand.Uint32()))
-	err = files.WriteTo(fil, tmpFile)
-	require.NoError(t, err)
-
-	return tmpFile
 }

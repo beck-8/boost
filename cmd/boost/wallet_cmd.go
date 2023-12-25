@@ -5,19 +5,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
-	"github.com/filecoin-project/boost/cmd"
-
+	"github.com/dustin/go-humanize"
 	"github.com/filecoin-project/boost/cli/node"
+	"github.com/filecoin-project/boost/cmd"
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/big"
+	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/chain/types"
 	lcli "github.com/filecoin-project/lotus/cli"
 	"github.com/filecoin-project/lotus/lib/tablewriter"
-	cli "github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v2"
+	"golang.org/x/term"
 )
 
 var walletCmd = &cli.Command{
@@ -32,6 +35,7 @@ var walletCmd = &cli.Command{
 		walletGetDefault,
 		walletSetDefault,
 		walletDelete,
+		walletSign,
 	},
 }
 
@@ -119,6 +123,7 @@ var walletList = &cli.Command{
 		nonceKey := "Nonce"
 		defaultKey := "Default"
 		errorKey := "Error"
+		dataCapKey := "DataCap"
 
 		// One-to-one mapping between tablewriter keys and JSON keys
 		tableKeysToJsonKeys := map[string]string{
@@ -129,6 +134,7 @@ var walletList = &cli.Command{
 			nonceKey:   strings.ToLower(nonceKey),
 			defaultKey: strings.ToLower(defaultKey),
 			errorKey:   strings.ToLower(errorKey),
+			dataCapKey: strings.ToLower(dataCapKey),
 		}
 
 		// List of Maps whose keys are defined above. One row = one list element = one wallet
@@ -196,6 +202,21 @@ var walletList = &cli.Command{
 						wallet[marketLockedKey] = marketLockedValue
 					}
 				}
+				dcap, err := api.StateVerifiedClientStatus(ctx, addr, types.EmptyTSK)
+				if err == nil {
+					wallet[dataCapKey] = dcap
+					if !cctx.Bool("json") && dcap == nil {
+						wallet[dataCapKey] = "X"
+					} else if dcap != nil {
+						wallet[dataCapKey] = humanize.IBytes(dcap.Int.Uint64())
+					}
+				} else {
+					wallet[dataCapKey] = "n/a"
+					if cctx.Bool("json") {
+						wallet[dataCapKey] = nil
+					}
+				}
+
 				wallets = append(wallets, wallet)
 			}
 		}
@@ -227,11 +248,7 @@ var walletList = &cli.Command{
 					tablewriter.NewLineCol(errorKey))
 				// populate it with content
 				for _, wallet := range wallets {
-					for k, v := range wallet {
-						tw.Write(map[string]interface{}{
-							k: v,
-						})
-					}
+					tw.Write(wallet)
 				}
 				// return the corresponding string
 				return tw.Flush(os.Stdout)
@@ -374,16 +391,35 @@ var walletImport = &cli.Command{
 
 		var inpdata []byte
 		if !cctx.Args().Present() || cctx.Args().First() == "-" {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Enter private key: ")
-			indata, err := reader.ReadBytes('\n')
-			if err != nil {
-				return err
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				fmt.Print("Enter private key(not display in the terminal): ")
+
+				sigCh := make(chan os.Signal, 1)
+				// Notify the channel when SIGINT is received
+				signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+				go func() {
+					<-sigCh
+					fmt.Println("\nInterrupt signal received. Exiting...")
+					os.Exit(1)
+				}()
+
+				inpdata, err = term.ReadPassword(int(os.Stdin.Fd()))
+				if err != nil {
+					return err
+				}
+				fmt.Println()
+			} else {
+				reader := bufio.NewReader(os.Stdin)
+				indata, err := reader.ReadBytes('\n')
+				if err != nil {
+					return err
+				}
+				inpdata = indata
 			}
-			inpdata = indata
 
 		} else {
-			fdata, err := ioutil.ReadFile(cctx.Args().First())
+			fdata, err := os.ReadFile(cctx.Args().First())
 			if err != nil {
 				return err
 			}
@@ -527,5 +563,54 @@ var walletDelete = &cli.Command{
 		}
 
 		return n.Wallet.WalletDelete(ctx, addr)
+	},
+}
+
+var walletSign = &cli.Command{
+	Name:      "sign",
+	Usage:     "Sign a message",
+	ArgsUsage: "<signing address> <hexMessage>",
+	Action: func(cctx *cli.Context) error {
+		ctx := lcli.ReqContext(cctx)
+
+		n, err := node.Setup(cctx.String(cmd.FlagRepo.Name))
+		if err != nil {
+			return err
+		}
+
+		if !cctx.Args().Present() || cctx.NArg() != 2 {
+			return fmt.Errorf("must specify signing address and message to sign")
+		}
+
+		addr, err := address.NewFromString(cctx.Args().First())
+		if err != nil {
+			return err
+		}
+
+		msg, err := hex.DecodeString(cctx.Args().Get(1))
+		if err != nil {
+			return err
+		}
+
+		sig, err := n.Wallet.WalletSign(ctx, addr, msg, api.MsgMeta{Type: api.MTUnknown})
+		if err != nil {
+			return err
+		}
+
+		sigBytes := append([]byte{byte(sig.Type)}, sig.Data...)
+
+		if cctx.Bool("json") {
+			out := map[string]interface{}{
+				"signature": hex.EncodeToString(sigBytes),
+			}
+			err := cmd.PrintJson(out)
+			if err != nil {
+				return err
+			}
+		} else {
+			fmt.Println(hex.EncodeToString(sigBytes))
+		}
+
+		return nil
 	},
 }

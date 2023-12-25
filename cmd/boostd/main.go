@@ -3,12 +3,11 @@ package main
 import (
 	"os"
 
+	"github.com/filecoin-project/boost/build"
 	"github.com/filecoin-project/boost/cmd"
+	"github.com/filecoin-project/boost/extern/boostd-data/shared/cliutil"
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/urfave/cli/v2"
-
-	"github.com/filecoin-project/boost/build"
-	cliutil "github.com/filecoin-project/boost/cli/util"
 )
 
 var log = logging.Logger("boostd")
@@ -41,15 +40,18 @@ func main() {
 			migrateMarketsCmd,
 			backupCmd,
 			restoreCmd,
+			configCmd,
 			dummydealCmd,
 			dataTransfersCmd,
 			retrievalDealsCmd,
 			indexProvCmd,
 			importDataCmd,
+			//importDirectDataCmd,
 			logCmd,
 			dagstoreCmd,
-			piecesCmd,
 			netCmd,
+			pieceDirCmd,
+			recoverCmd,
 		},
 	}
 	app.Setup()
@@ -66,18 +68,30 @@ func before(cctx *cli.Context) error {
 	_ = logging.SetLogLevel("modules", "INFO")
 	_ = logging.SetLogLevel("cfg", "INFO")
 	_ = logging.SetLogLevel("boost-storage-deal", "INFO")
+	_ = logging.SetLogLevel("piecedir", "INFO")
+	_ = logging.SetLogLevel("index-provider-wrapper", "INFO")
+	_ = logging.SetLogLevel("unsmgr", "INFO")
+	_ = logging.SetLogLevel("piecedoc", "INFO")
+	_ = logging.SetLogLevel("piecedirectory", "INFO")
+	_ = logging.SetLogLevel("sectorstatemgr", "INFO")
+	_ = logging.SetLogLevel("migrations", "INFO")
 
 	if cliutil.IsVeryVerbose {
 		_ = logging.SetLogLevel("boostd", "DEBUG")
 		_ = logging.SetLogLevel("provider", "DEBUG")
 		_ = logging.SetLogLevel("boost-net", "DEBUG")
-		_ = logging.SetLogLevel("gql", "DEBUG")
 		_ = logging.SetLogLevel("boost-provider", "DEBUG")
 		_ = logging.SetLogLevel("storagemanager", "DEBUG")
 		_ = logging.SetLogLevel("index-provider-wrapper", "DEBUG")
 		_ = logging.SetLogLevel("boost-migrator", "DEBUG")
 		_ = logging.SetLogLevel("dagstore", "DEBUG")
 		_ = logging.SetLogLevel("migrator", "DEBUG")
+		_ = logging.SetLogLevel("piecedir", "DEBUG")
+		_ = logging.SetLogLevel("fxlog", "DEBUG")
+		_ = logging.SetLogLevel("unsmgr", "DEBUG")
+		_ = logging.SetLogLevel("piecedoc", "DEBUG")
+		_ = logging.SetLogLevel("piecedirectory", "DEBUG")
+		_ = logging.SetLogLevel("sectorstatemgr", "DEBUG")
 	}
 
 	return nil

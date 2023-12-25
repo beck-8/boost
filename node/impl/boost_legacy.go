@@ -7,14 +7,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/filecoin-project/dagstore/shard"
-	"github.com/multiformats/go-multihash"
-
+	"github.com/filecoin-project/boost-gfm/retrievalmarket"
+	"github.com/filecoin-project/boost-gfm/storagemarket"
+	"github.com/filecoin-project/boost/api"
 	"github.com/filecoin-project/go-address"
 	datatransfer "github.com/filecoin-project/go-data-transfer"
-	"github.com/filecoin-project/go-fil-markets/piecestore"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-state-types/abi"
 	lapi "github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/chain/types"
@@ -22,15 +19,23 @@ import (
 	peer "github.com/libp2p/go-libp2p/core/peer"
 )
 
-func (sm *BoostAPI) MarketListDataTransfers(ctx context.Context) ([]lapi.DataTransferChannel, error) {
+func (sm *BoostAPI) MarketListDataTransfers(ctx context.Context) ([]api.DataTransferChannel, error) {
 	inProgressChannels, err := sm.DataTransfer.InProgressChannels(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	apiChannels := make([]lapi.DataTransferChannel, 0, len(inProgressChannels))
+	unpaidRetrievals := sm.GraphsyncUnpaidRetrieval.List()
+
+	// Get legacy, paid retrievals
+	apiChannels := make([]api.DataTransferChannel, 0, len(inProgressChannels)+len(unpaidRetrievals))
 	for _, channelState := range inProgressChannels {
-		apiChannels = append(apiChannels, lapi.NewDataTransferChannel(sm.Host.ID(), channelState))
+		apiChannels = append(apiChannels, api.NewDataTransferChannel(sm.Host.ID(), channelState))
+	}
+
+	// Include unpaid retrievals
+	for _, ur := range unpaidRetrievals {
+		apiChannels = append(apiChannels, api.NewDataTransferChannel(sm.Host.ID(), ur.ChannelState()))
 	}
 
 	return apiChannels, nil
@@ -46,17 +51,25 @@ func (sm *BoostAPI) MarketRestartDataTransfer(ctx context.Context, transferID da
 
 func (sm *BoostAPI) MarketCancelDataTransfer(ctx context.Context, transferID datatransfer.TransferID, otherPeer peer.ID, isInitiator bool) error {
 	selfPeer := sm.Host.ID()
+
+	// Attempt to cancel unpaid first, if that succeeds, we're done
+	err := sm.GraphsyncUnpaidRetrieval.CancelTransfer(ctx, transferID, &otherPeer)
+	if err == nil {
+		return nil
+	}
+
+	// Legacy, paid retrievals
 	if isInitiator {
 		return sm.DataTransfer.CloseDataTransferChannel(ctx, datatransfer.ChannelID{Initiator: selfPeer, Responder: otherPeer, ID: transferID})
 	}
 	return sm.DataTransfer.CloseDataTransferChannel(ctx, datatransfer.ChannelID{Initiator: otherPeer, Responder: selfPeer, ID: transferID})
 }
 
-func (sm *BoostAPI) MarketDataTransferUpdates(ctx context.Context) (<-chan lapi.DataTransferChannel, error) {
-	channels := make(chan lapi.DataTransferChannel)
+func (sm *BoostAPI) MarketDataTransferUpdates(ctx context.Context) (<-chan api.DataTransferChannel, error) {
+	channels := make(chan api.DataTransferChannel)
 
 	unsub := sm.DataTransfer.SubscribeToEvents(func(evt datatransfer.Event, channelState datatransfer.ChannelState) {
-		channel := lapi.NewDataTransferChannel(sm.Host.ID(), channelState)
+		channel := api.NewDataTransferChannel(sm.Host.ID(), channelState)
 		select {
 		case <-ctx.Done():
 		case channels <- channel:
@@ -72,8 +85,10 @@ func (sm *BoostAPI) MarketDataTransferUpdates(ctx context.Context) (<-chan lapi.
 }
 
 func (sm *BoostAPI) MarketListRetrievalDeals(ctx context.Context) ([]retrievalmarket.ProviderDealState, error) {
-	var out []retrievalmarket.ProviderDealState
 	deals := sm.RetrievalProvider.ListDeals()
+	unpaidRetrievals := sm.GraphsyncUnpaidRetrieval.List()
+
+	out := make([]retrievalmarket.ProviderDealState, 0, len(deals)+len(unpaidRetrievals))
 
 	for _, deal := range deals {
 		if deal.ChannelID != nil {
@@ -82,6 +97,10 @@ func (sm *BoostAPI) MarketListRetrievalDeals(ctx context.Context) ([]retrievalma
 			}
 		}
 		out = append(out, deal)
+	}
+
+	for _, ur := range unpaidRetrievals {
+		out = append(out, ur.ProviderDealState())
 	}
 
 	return out, nil
@@ -193,52 +212,6 @@ func (sm *BoostAPI) ActorSectorSize(ctx context.Context, addr address.Address) (
 		return 0, err
 	}
 	return mi.SectorSize, nil
-}
-
-func (sm *BoostAPI) PiecesListPieces(ctx context.Context) ([]cid.Cid, error) {
-	return sm.PieceStore.ListPieceInfoKeys()
-}
-
-func (sm *BoostAPI) PiecesListCidInfos(ctx context.Context) ([]cid.Cid, error) {
-	return sm.PieceStore.ListCidInfoKeys()
-}
-
-func (sm *BoostAPI) PiecesGetPieceInfo(ctx context.Context, pieceCid cid.Cid) (*piecestore.PieceInfo, error) {
-	pi, err := sm.PieceStore.GetPieceInfo(pieceCid)
-	if err != nil {
-		return nil, fmt.Errorf("getting piece from piece store: %w", err)
-	}
-	return &pi, nil
-}
-
-func (sm *BoostAPI) PiecesGetCIDInfo(ctx context.Context, payloadCid cid.Cid) (*piecestore.CIDInfo, error) {
-	ci, err := sm.PieceStore.GetCIDInfo(payloadCid)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ci, nil
-}
-
-func (sm *BoostAPI) PiecesGetMaxOffset(ctx context.Context, pieceCid cid.Cid) (uint64, error) {
-	var maxOffset uint64
-
-	it, err := sm.DAGStore.GetIterableIndex(shard.KeyFromCID(pieceCid))
-	if err != nil {
-		return maxOffset, fmt.Errorf("getting iterable index for piece %s from DAG store: %w", pieceCid, err)
-	}
-
-	err = it.ForEach(func(mh multihash.Multihash, offset uint64) error {
-		if offset > maxOffset {
-			maxOffset = offset
-		}
-		return nil
-	})
-	if err != nil {
-		return maxOffset, fmt.Errorf("iterating over CAR index: %w", err)
-	}
-
-	return maxOffset, err
 }
 
 func (sm *BoostAPI) RuntimeSubsystems(context.Context) (res lapi.MinerSubsystems, err error) {

@@ -3,15 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
+	llog "log"
 	"os"
 
 	"github.com/filecoin-project/boost/cmd"
 
-	llog "log"
-
 	"github.com/filecoin-project/boost/build"
-	cliutil "github.com/filecoin-project/boost/cli/util"
+	"github.com/filecoin-project/boost/extern/boostd-data/shared/cliutil"
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/urfave/cli/v2"
 )
@@ -19,7 +18,7 @@ import (
 var log = logging.Logger("boost")
 
 func init() {
-	llog.SetOutput(ioutil.Discard)
+	llog.SetOutput(io.Discard)
 }
 
 func main() {
@@ -37,9 +36,13 @@ func main() {
 			initCmd,
 			dealCmd,
 			dealStatusCmd,
+			retrieveCmd,
 			offlineDealCmd,
 			providerCmd,
 			walletCmd,
+			//TODO: enable when DDO ends up in a network upgrade
+			//directDealAllocate,
+			//directDealGetAllocations,
 		},
 	}
 	app.Setup()

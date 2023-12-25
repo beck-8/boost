@@ -5,9 +5,10 @@ import (
 	"errors"
 	"time"
 
+	marketevents "github.com/filecoin-project/boost/markets/loggers"
+	"github.com/filecoin-project/boost/node/modules/dtypes"
 	dtimpl "github.com/filecoin-project/go-data-transfer/impl"
-	marketevents "github.com/filecoin-project/lotus/markets/loggers"
-	"github.com/filecoin-project/lotus/node/modules/dtypes"
+	lotus_dtypes "github.com/filecoin-project/lotus/node/modules/dtypes"
 	"github.com/filecoin-project/lotus/node/repo"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
@@ -15,7 +16,7 @@ import (
 )
 
 // NewProviderDataTransfer returns a data transfer manager
-func NewProviderDataTransfer(lc fx.Lifecycle, net dtypes.ProviderTransferNetwork, transport dtypes.ProviderTransport, ds dtypes.MetadataDS, r repo.LockedRepo) (dtypes.ProviderDataTransfer, error) {
+func NewProviderDataTransfer(lc fx.Lifecycle, net dtypes.ProviderTransferNetwork, transport dtypes.ProviderTransport, ds lotus_dtypes.MetadataDS, r repo.LockedRepo) (dtypes.ProviderDataTransfer, error) {
 	dtDs := namespace.Wrap(ds, datastore.NewKey("/datatransfer/provider/transfers"))
 
 	dt, err := dtimpl.NewDataTransfer(dtDs, net, transport)

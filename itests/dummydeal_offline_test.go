@@ -17,7 +17,9 @@ func TestDummydealOffline(t *testing.T) {
 
 	kit.QuietMiningLogs()
 	framework.SetLogLevel()
-	f := framework.NewTestFramework(ctx, t)
+	var opts []framework.FrameworkOpts
+	opts = append(opts, framework.EnableLegacyDeals(true))
+	f := framework.NewTestFramework(ctx, t, opts...)
 	err := f.Start()
 	require.NoError(t, err)
 	defer f.Stop()
@@ -34,10 +36,11 @@ func TestDummydealOffline(t *testing.T) {
 
 	// make an offline deal
 	offlineDealUuid := uuid.New()
-	res, err := f.MakeDummyDeal(offlineDealUuid, carFilepath, rootCid, "", true)
+	dealRes, err := f.MakeDummyDeal(offlineDealUuid, carFilepath, rootCid, "", true)
+	res := dealRes.Result
 	require.NoError(t, err)
 	require.True(t, res.Accepted)
-	res, err = f.Boost.BoostOfflineDealWithData(context.Background(), offlineDealUuid, carFilepath)
+	res, err = f.Boost.BoostOfflineDealWithData(context.Background(), offlineDealUuid, carFilepath, false)
 	require.NoError(t, err)
 	require.True(t, res.Accepted)
 	err = f.WaitForDealAddedToSector(offlineDealUuid)

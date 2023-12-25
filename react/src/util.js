@@ -128,3 +128,16 @@ export function parseFil(str) {
 
     return val
 }
+
+export function isContractAddress(addr) {
+    const addressType = addr.substring(0, 2)
+    return addressType === 't4' || addressType === 'f4'
+}
+
+export function isInteger(num){
+    const isNum = (typeof(num) === 'number' || typeof(num) === "string" && num.trim() !== '') && !isNaN(num);
+    if (!isNum) {
+        return false
+    }
+    return (num+'').indexOf('.') == -1
+}

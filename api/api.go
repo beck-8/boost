@@ -3,12 +3,11 @@ package api
 import (
 	"context"
 
+	"github.com/filecoin-project/boost-gfm/retrievalmarket"
+	"github.com/filecoin-project/boost-gfm/storagemarket"
 	smtypes "github.com/filecoin-project/boost/storagemarket/types"
 	"github.com/filecoin-project/go-address"
 	datatransfer "github.com/filecoin-project/go-data-transfer"
-	"github.com/filecoin-project/go-fil-markets/piecestore"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-state-types/abi"
 	lapi "github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/chain/types"
@@ -34,24 +33,32 @@ type Boost interface {
 	Net
 
 	// MethodGroup: Boost
-	BoostIndexerAnnounceAllDeals(ctx context.Context) error                                                                        //perm:admin
-	BoostOfflineDealWithData(ctx context.Context, dealUuid uuid.UUID, filePath string) (*ProviderDealRejectionInfo, error)         //perm:admin
-	BoostDeal(ctx context.Context, dealUuid uuid.UUID) (*smtypes.ProviderDealState, error)                                         //perm:admin
-	BoostDealBySignedProposalCid(ctx context.Context, proposalCid cid.Cid) (*smtypes.ProviderDealState, error)                     //perm:admin
-	BoostDummyDeal(context.Context, smtypes.DealParams) (*ProviderDealRejectionInfo, error)                                        //perm:admin
-	BoostDagstoreRegisterShard(ctx context.Context, key string) error                                                              //perm:admin
-	BoostDagstoreDestroyShard(ctx context.Context, key string) error                                                               //perm:admin
-	BoostDagstoreInitializeShard(ctx context.Context, key string) error                                                            //perm:admin
-	BoostDagstoreInitializeAll(ctx context.Context, params DagstoreInitializeAllParams) (<-chan DagstoreInitializeAllEvent, error) //perm:admin
-	BoostDagstoreRecoverShard(ctx context.Context, key string) error                                                               //perm:admin
-	BoostDagstoreGC(ctx context.Context) ([]DagstoreShardResult, error)                                                            //perm:admin
-	BoostDagstorePiecesContainingMultihash(ctx context.Context, mh multihash.Multihash) ([]cid.Cid, error)                         //perm:read
-	BoostDagstoreListShards(ctx context.Context) ([]DagstoreShardInfo, error)                                                      //perm:read
+	BoostIndexerAnnounceAllDeals(ctx context.Context) error                                                                                     //perm:admin
+	BoostIndexerListMultihashes(ctx context.Context, proposalCid cid.Cid) ([]multihash.Multihash, error)                                        //perm:admin
+	BoostIndexerAnnounceLatest(ctx context.Context) (cid.Cid, error)                                                                            //perm:admin
+	BoostIndexerAnnounceLatestHttp(ctx context.Context, urls []string) (cid.Cid, error)                                                         //perm:admin
+	BoostOfflineDealWithData(ctx context.Context, dealUuid uuid.UUID, filePath string, delAfterImport bool) (*ProviderDealRejectionInfo, error) //perm:admin
+	BoostDeal(ctx context.Context, dealUuid uuid.UUID) (*smtypes.ProviderDealState, error)                                                      //perm:admin
+	BoostDealBySignedProposalCid(ctx context.Context, proposalCid cid.Cid) (*smtypes.ProviderDealState, error)                                  //perm:admin
+	BoostDummyDeal(context.Context, smtypes.DealParams) (*ProviderDealRejectionInfo, error)                                                     //perm:admin
+	BoostDagstoreRegisterShard(ctx context.Context, key string) error                                                                           //perm:admin
+	BoostDagstoreDestroyShard(ctx context.Context, key string) error                                                                            //perm:admin
+	BoostDagstoreInitializeShard(ctx context.Context, key string) error                                                                         //perm:admin
+	BoostDagstoreInitializeAll(ctx context.Context, params DagstoreInitializeAllParams) (<-chan DagstoreInitializeAllEvent, error)              //perm:admin
+	BoostDagstoreRecoverShard(ctx context.Context, key string) error                                                                            //perm:admin
+	BoostDagstoreGC(ctx context.Context) ([]DagstoreShardResult, error)                                                                         //perm:admin
+	BoostDagstorePiecesContainingMultihash(ctx context.Context, mh multihash.Multihash) ([]cid.Cid, error)                                      //perm:read
+	BoostDagstoreListShards(ctx context.Context) ([]DagstoreShardInfo, error)                                                                   //perm:admin
+	BoostMakeDeal(context.Context, smtypes.DealParams) (*ProviderDealRejectionInfo, error)                                                      //perm:write
+	BoostDirectDeal(ctx context.Context, params smtypes.DirectDealParams) (*ProviderDealRejectionInfo, error)                                   //perm:admin
 
 	// MethodGroup: Blockstore
 	BlockstoreGet(ctx context.Context, c cid.Cid) ([]byte, error)  //perm:read
 	BlockstoreHas(ctx context.Context, c cid.Cid) (bool, error)    //perm:read
 	BlockstoreGetSize(ctx context.Context, c cid.Cid) (int, error) //perm:read
+
+	// MethodGroup: PieceDirectory
+	PdBuildIndexForPieceCid(ctx context.Context, piececid cid.Cid) error //perm:admin
 
 	// RuntimeSubsystems returns the subsystems that are enabled
 	// in this instance.
@@ -63,20 +70,14 @@ type Boost interface {
 	MarketGetRetrievalAsk(ctx context.Context) (*retrievalmarket.Ask, error)                                                                                                             //perm:read
 	MarketSetAsk(ctx context.Context, price types.BigInt, verifiedPrice types.BigInt, duration abi.ChainEpoch, minPieceSize abi.PaddedPieceSize, maxPieceSize abi.PaddedPieceSize) error //perm:admin
 	MarketGetAsk(ctx context.Context) (*storagemarket.SignedStorageAsk, error)                                                                                                           //perm:read
-	MarketListDataTransfers(ctx context.Context) ([]lapi.DataTransferChannel, error)                                                                                                     //perm:write
-	MarketDataTransferUpdates(ctx context.Context) (<-chan lapi.DataTransferChannel, error)                                                                                              //perm:write
+	MarketListDataTransfers(ctx context.Context) ([]DataTransferChannel, error)                                                                                                          //perm:write
+	MarketDataTransferUpdates(ctx context.Context) (<-chan DataTransferChannel, error)                                                                                                   //perm:write
 	MarketRestartDataTransfer(ctx context.Context, transferID datatransfer.TransferID, otherPeer peer.ID, isInitiator bool) error                                                        //perm:write
 	MarketCancelDataTransfer(ctx context.Context, transferID datatransfer.TransferID, otherPeer peer.ID, isInitiator bool) error                                                         //perm:write
 	MarketImportDealData(ctx context.Context, propcid cid.Cid, path string) error                                                                                                        //perm:write
 	MarketListIncompleteDeals(ctx context.Context) ([]storagemarket.MinerDeal, error)                                                                                                    //perm:read
 	MarketPendingDeals(ctx context.Context) (lapi.PendingDealInfo, error)                                                                                                                //perm:write
 	SectorsRefs(context.Context) (map[string][]lapi.SealedRef, error)                                                                                                                    //perm:read
-
-	PiecesListPieces(ctx context.Context) ([]cid.Cid, error)                                 //perm:read
-	PiecesListCidInfos(ctx context.Context) ([]cid.Cid, error)                               //perm:read
-	PiecesGetPieceInfo(ctx context.Context, pieceCid cid.Cid) (*piecestore.PieceInfo, error) //perm:read
-	PiecesGetCIDInfo(ctx context.Context, payloadCid cid.Cid) (*piecestore.CIDInfo, error)   //perm:read
-	PiecesGetMaxOffset(ctx context.Context, pieceCid cid.Cid) (uint64, error)                //perm:read
 
 	// MethodGroup: Actor
 	ActorSectorSize(context.Context, address.Address) (abi.SectorSize, error) //perm:read
@@ -96,6 +97,9 @@ type Boost interface {
 	DealsSetConsiderVerifiedStorageDeals(context.Context, bool) error   //perm:admin
 	DealsConsiderUnverifiedStorageDeals(context.Context) (bool, error)  //perm:admin
 	DealsSetConsiderUnverifiedStorageDeals(context.Context, bool) error //perm:admin
+
+	// MethodGroup: Misc
+	OnlineBackup(context.Context, string) error //perm:admin
 }
 
 // DagstoreShardInfo is the serialized form of dagstore.DagstoreShardInfo that

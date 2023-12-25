@@ -8,7 +8,7 @@ import moment from "moment";
 import React, {useState} from "react";
 import {PageContainer, ShortClientAddress, ShortDealID, ShortDealLink} from "./Components";
 import {Link, useNavigate, useParams} from "react-router-dom";
-import {dateFormat} from "./util-date";
+import {dateFormat, durationNanoToString} from "./util-date";
 import {TimestampFormat} from "./timestamp";
 import './ProposalLogs.css'
 import {Pagination} from "./Pagination";
@@ -53,7 +53,7 @@ function ProposalLogsContent(props) {
         } catch {}
     }
     const {loading, error, data} = useQuery(ProposalLogsListQuery, {
-        pollInterval: 1000,
+        pollInterval: 10000,
         variables: {
             cursor: queryCursor,
             offset: listOffset,
@@ -170,11 +170,9 @@ function LogRow(props) {
     )
 }
 
-const ONE_MINUTE = 60 * 1000
-const ONE_HOUR = 60 * ONE_MINUTE
 export function ProposalLogsMenuItem(props) {
     const {data} = useQuery(ProposalLogsCountQuery, {
-        pollInterval: 5000,
+        pollInterval: 10000,
         fetchPolicy: 'network-only',
         variables: {
             accepted: true,
@@ -188,11 +186,7 @@ export function ProposalLogsMenuItem(props) {
         const plc = data.proposalLogsCount
         acceptCount = plc.Accepted
         rejectCount = plc.Rejected
-        const durationMillis = Number(plc.Period / BigInt(1e6))
-        durationDisplay = (durationMillis / ONE_HOUR) + 'h'
-        if (durationMillis < ONE_HOUR) {
-            durationDisplay = (durationMillis / ONE_MINUTE) + 'm'
-        }
+        durationDisplay = durationNanoToString(plc.Period)
     }
 
     return (

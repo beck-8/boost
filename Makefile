@@ -7,18 +7,20 @@ unexport GOFLAGS
 
 GOCC?=go
 
+ARCH?=$(shell arch)
 GOVERSION:=$(shell $(GOCC) version | tr ' ' '\n' | grep go1 | sed 's/^go//' | awk -F. '{printf "%d%03d%03d", $$1, $$2, $$3}')
-ifeq ($(shell expr $(GOVERSION) \< 1016000), 1)
+ifeq ($(shell expr $(GOVERSION) \< 1020000), 1)
 $(warning Your Golang version is go$(shell expr $(GOVERSION) / 1000000).$(shell expr $(GOVERSION) % 1000000 / 1000).$(shell expr $(GOVERSION) % 1000))
-$(error Update Golang to version to at least 1.16.0)
+$(error Update Golang to version to at least 1.20.0)
 endif
 
-LTS_NODE_VER=16
-NODE_VER=$(shell node -v)
-ifeq ($(patsubst v$(LTS_NODE_VER).%,matched,$(NODE_VER)), matched)
-	NODE_LTS=true
+ALLOWED_NODE_VERSIONS := 16 18 20
+validate-node-version:
+ifeq ($(filter $(shell node -v | cut -c2-3),$(ALLOWED_NODE_VERSIONS)),)
+	@echo "Unsupported Node.js version. Please install one of the following versions: $(ALLOWED_NODE_VERSIONS)"
+	exit 1
 else
-	NODE_LTS=false
+	@echo "Node.js version $(shell node -v) is supported."
 endif
 
 # git modules that need to be loaded
@@ -78,6 +80,12 @@ calibnet-go: build-go
 deps: $(BUILD_DEPS)
 .PHONY: deps
 
+migrate-lid: $(BUILD_DEPS)
+	rm -f migrate-lid
+	$(GOCC) build $(GOFLAGS) -o migrate-lid ./cmd/migrate-lid
+.PHONY: migrate-lid
+BINS+=migrate-lid
+
 boostx: $(BUILD_DEPS)
 	rm -f boostx
 	$(GOCC) build $(GOFLAGS) -o boostx ./cmd/boostx
@@ -85,12 +93,22 @@ boostx: $(BUILD_DEPS)
 BINS+=boostx
 
 boost: $(BUILD_DEPS)
-	rm -f boost boostd boostx
+	rm -f boost
 	$(GOCC) build $(GOFLAGS) -o boost ./cmd/boost
-	$(GOCC) build $(GOFLAGS) -o boostx ./cmd/boostx
-	$(GOCC) build $(GOFLAGS) -o boostd ./cmd/boostd
 .PHONY: boost
-BINS+=boost boostx boostd
+BINS+=boost
+
+boostd: $(BUILD_DEPS)
+	rm -f boostd
+	$(GOCC) build $(GOFLAGS) -o boostd ./cmd/boostd
+.PHONY: boostd
+BINS+=boostd
+
+boostd-data:
+	$(MAKE) -C ./extern/boostd-data
+	install -C ./extern/boostd-data/boostd-data ./boostd-data
+.PHONY: boostd-data
+BINS+=boostd-data
 
 booster-http: $(BUILD_DEPS)
 	rm -f booster-http
@@ -115,22 +133,17 @@ boostci: $(BUILD_DEPS)
 	$(GOCC) build $(GOFLAGS) -o boostci ./cmd/boostci
 .PHONY: boostci
 
-react: check-node-lts
+react: validate-node-version
 	npm_config_legacy_peer_deps=yes npm ci --no-audit --prefix react
 	npm run --prefix react build
 .PHONY: react
 
-update-react: check-node-lts
+update-react: validate-node-version
 	npm_config_legacy_peer_deps=yes npm install --no-audit --prefix react
 	npm run --prefix react build
 .PHONY: react
 
-.PHONY: check-node-lts
-check-node-lts:
-	@$(NODE_LTS) || echo Build requires Node v$(LTS_NODE_VER) \(detected Node $(NODE_VER)\)
-	@$(NODE_LTS) && echo Building using Node v$(LTS_NODE_VER)
-
-build-go: boost devnet
+build-go: boost boostd boostx boostd-data booster-http booster-bitswap devnet migrate-lid
 .PHONY: build-go
 
 build: react build-go
@@ -145,6 +158,10 @@ install-boost:
 	install -C ./boost /usr/local/bin/boost
 	install -C ./boostd /usr/local/bin/boostd
 	install -C ./boostx /usr/local/bin/boostx
+	install -C ./boostd-data /usr/local/bin/boostd-data
+	install -C ./booster-http /usr/local/bin/booster-http
+	install -C ./booster-bitswap /usr/local/bin/booster-bitswap
+	install -C ./migrate-lid /usr/local/bin/migrate-lid
 
 install-devnet:
 	install -C ./devnet /usr/local/bin/devnet
@@ -200,35 +217,87 @@ docsgen-openrpc-boost: docsgen-openrpc-bin
 
 ## DOCKER IMAGES
 docker_user?=filecoin
-lotus_version?=1.17.2-rc2
-lotus_src_dir?=
-
-ifeq ($(lotus_src_dir),)
-    lotus_src_dir=/tmp/lotus-$(lotus_version)
-    lotus_checkout_dir=$(lotus_src_dir)
+lotus_version?=v1.25.0
+ffi_from_source?=0
+build_lotus?=0
+build_boost?=1
+boost_version?=v2.1.0-rc2
+ifeq ($(build_boost),1)
+#v1: build boost images currently checked out branch
+	boost_build_cmd=docker/boost
+	booster_http_build_cmd=docker/booster-http
+	booster_bitswap_build_cmd=docker/booster-bitswap
 else
-    lotus_version=dev
-    lotus_checkout_dir=
+# v2: pull images from the github repo
+	boost_build_cmd=pull/boost retag/boost
+	booster_http_build_cmd=pull/booster-http retag/booster-http
+	booster_bitswap_build_cmd=pull/booster-bitswap retag/booster-bitswap
 endif
-lotus_test_image=$(docker_user)/lotus-test:$(lotus_version)
-docker_build_cmd=docker build --build-arg LOTUS_TEST_IMAGE=$(lotus_test_image) $(docker_args)
+ifeq ($(build_lotus),1)
+# v1: building lotus image with provided lotus version
+	lotus_info_msg=!!! building lotus base image from github: branch/tag $(lotus_version) !!!
+	override lotus_src_dir=/tmp/lotus-$(lotus_version)
+	lotus_build_cmd=update/lotus docker/lotus-all-in-one
+	lotus_base_image=$(docker_user)/lotus-all-in-one:$(lotus_version)-debug
+else
+# v2 (default): using prebuilt lotus image
+	lotus_base_image?=ghcr.io/filecoin-shipyard/lotus-containers:lotus-$(lotus_version)-devnet
+	lotus_info_msg=using lotus image from github: $(lotus_base_image)
+	lotus_build_cmd=info/lotus-all-in-one
+endif
+docker_build_cmd=docker build --build-arg LOTUS_TEST_IMAGE=$(lotus_base_image) \
+	--build-arg FFI_BUILD_FROM_SOURCE=$(ffi_from_source) $(docker_args)
+### lotus-all-in-one docker image build
+info/lotus-all-in-one:
+	@echo Docker build info: $(lotus_info_msg)
+.PHONY: info/lotus-all-in-one
+### checkout/update lotus if needed
+$(lotus_src_dir):
+	git clone --depth 1 --branch $(lotus_version) https://github.com/filecoin-project/lotus $@
+update/lotus: $(lotus_src_dir)
+	cd $(lotus_src_dir) && git pull
+.PHONY: update/lotus
 
-### lotus test docker image
-info/lotus-test:
-	@echo Lotus dir = $(lotus_src_dir)
-	@echo Lotus ver = $(lotus_version)
-.PHONY: info/lotus-test
-$(lotus_checkout_dir):
-	git clone --depth 1 --branch v$(lotus_version) https://github.com/filecoin-project/lotus $@
-docker/lotus-test: info/lotus-test | $(lotus_checkout_dir)
-	cd $(lotus_src_dir) && $(docker_build_cmd) -f Dockerfile.lotus --target lotus-test \
-		-t $(lotus_test_image) .
-.PHONY: docker/lotus-test
+docker/lotus-all-in-one: info/lotus-all-in-one | $(lotus_src_dir)
+	cd $(lotus_src_dir) && $(docker_build_cmd) -f Dockerfile --target lotus-all-in-one \
+		-t $(lotus_base_image) --build-arg GOFLAGS=-tags=debug .
+.PHONY: docker/lotus-all-in-one
+
+pull/boost:
+	docker pull ghcr.io/filecoin-project/boost:boost-dev-$(boost_version)
+.PHONY: pull/boost
+
+pull/booster-http:
+	docker pull ghcr.io/filecoin-project/boost:boost-http-dev-$(boost_version)
+.PHONY: pull/boost
+
+pull/booster-bitswap:
+	docker pull ghcr.io/filecoin-project/boost:boost-bitswap-dev-$(boost_version)
+.PHONY: pull/boost
+
+retag/boost:
+	docker tag ghcr.io/filecoin-project/boost:boost-dev-$(boost_version) $(docker_user)/boost-dev:dev
+.PHONY: retag/boost
+
+retag/booster-http:
+	docker tag ghcr.io/filecoin-project/boost:boost-http-dev-$(boost_version) $(docker_user)/booster-http-dev:dev
+.PHONY: retag/booster-http
+
+retag/booster-bitswap:
+	docker tag ghcr.io/filecoin-project/boost:boost-bitswap-dev-$(boost_version) $(docker_user)/booster-bitswap-dev:dev
+.PHONY: retag/booster-bitswap
+
+# boost-client main
+docker/mainnet/boost-client: build/.update-modules
+	DOCKER_BUILDKIT=1 $(docker_build_cmd) \
+		-t $(docker_user)/boost-main:main --build-arg BUILD_VERSION=dev \
+		-f docker/boost-client/Dockerfile.source --target boost-main .
+.PHONY: docker/mainnet/boost-client
 
 ### devnet images
 docker/%:
-	cd docker/devnet/$* && $(docker_build_cmd) -t $(docker_user)/$*-dev:$(lotus_version) \
-		--build-arg BUILD_VERSION=$(lotus_version) .
+	cd docker/devnet/$* && DOCKER_BUILDKIT=1 $(docker_build_cmd) -t $(docker_user)/$*-dev:dev \
+		--build-arg BUILD_VERSION=dev .
 docker/boost: build/.update-modules
 	DOCKER_BUILDKIT=1 $(docker_build_cmd) \
 		-t $(docker_user)/boost-dev:dev --build-arg BUILD_VERSION=dev \
@@ -243,7 +312,38 @@ docker/booster-bitswap:
 	DOCKER_BUILDKIT=1 $(docker_build_cmd) \
 		-t $(docker_user)/booster-bitswap-dev:dev --build-arg BUILD_VERSION=dev \
 		-f docker/devnet/Dockerfile.source --target booster-bitswap-dev .
+docker/yugabytedb:
+	DOCKER_BUILDKIT=1 $(docker_build_cmd) \
+		-t $(docker_user)/yugabytedb:dev \
+		-f docker/Dockerfile.yugabyte .
+.PHONY: docker/booster-http
 .PHONY: docker/booster-bitswap
-docker/all: docker/lotus-test docker/boost docker/booster-http docker/booster-bitswap \
-	docker/lotus docker/lotus-miner
+docker/all: $(lotus_build_cmd) $(boost_build_cmd) $(booster_http_build_cmd) $(booster_bitswap_build_cmd) \
+	docker/lotus docker/lotus-miner docker/yugabytedb
 .PHONY: docker/all
+
+### To allow devs to pull individual images. Require build_boost=0 and boost_version to be supplied
+docker/get-boost: $(boost_build_cmd)
+.PHONY: docker/get-boost
+
+docker/get-booster-http: $(booster_http_build_cmd)
+.PHONY: docker/get-booster-http
+
+docker/get-booster-bitswap: $(booster_bitswap_build_cmd)
+.PHONY: docker/get-booster-http
+
+test-lid:
+	cd ./extern/boostd-data && ARCH=$(ARCH) docker-compose up --build --exit-code-from go-tests
+
+devnet/up:
+	rm -rf ./docker/devnet/data && docker compose -f ./docker/devnet/docker-compose.yaml up -d
+
+devnet/%:
+	docker compose -f ./docker/devnet/docker-compose.yaml up --build $* -d
+
+devnet/down:
+	docker compose -f ./docker/devnet/docker-compose.yaml down --rmi=local && sleep 2 && rm -rf ./docker/devnet/data
+
+process?=/bin/bash
+devnet/exec:
+	docker compose -f ./docker/devnet/docker-compose.yaml exec $(service) $(process)

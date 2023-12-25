@@ -1,4 +1,6 @@
 # Groups
+* [](#)
+  * [Discover](#discover)
 * [Actor](#actor)
   * [ActorSectorSize](#actorsectorsize)
 * [Auth](#auth)
@@ -19,8 +21,13 @@
   * [BoostDagstoreRegisterShard](#boostdagstoreregistershard)
   * [BoostDeal](#boostdeal)
   * [BoostDealBySignedProposalCid](#boostdealbysignedproposalcid)
+  * [BoostDirectDeal](#boostdirectdeal)
   * [BoostDummyDeal](#boostdummydeal)
   * [BoostIndexerAnnounceAllDeals](#boostindexerannouncealldeals)
+  * [BoostIndexerAnnounceLatest](#boostindexerannouncelatest)
+  * [BoostIndexerAnnounceLatestHttp](#boostindexerannouncelatesthttp)
+  * [BoostIndexerListMultihashes](#boostindexerlistmultihashes)
+  * [BoostMakeDeal](#boostmakedeal)
   * [BoostOfflineDealWithData](#boostofflinedealwithdata)
 * [Deals](#deals)
   * [DealsConsiderOfflineRetrievalDeals](#dealsconsiderofflineretrievaldeals)
@@ -79,16 +86,36 @@
   * [NetPubsubScores](#netpubsubscores)
   * [NetSetLimit](#netsetlimit)
   * [NetStat](#netstat)
-* [Pieces](#pieces)
-  * [PiecesGetCIDInfo](#piecesgetcidinfo)
-  * [PiecesGetMaxOffset](#piecesgetmaxoffset)
-  * [PiecesGetPieceInfo](#piecesgetpieceinfo)
-  * [PiecesListCidInfos](#pieceslistcidinfos)
-  * [PiecesListPieces](#pieceslistpieces)
+* [Online](#online)
+  * [OnlineBackup](#onlinebackup)
+* [Pd](#pd)
+  * [PdBuildIndexForPieceCid](#pdbuildindexforpiececid)
 * [Runtime](#runtime)
   * [RuntimeSubsystems](#runtimesubsystems)
 * [Sectors](#sectors)
   * [SectorsRefs](#sectorsrefs)
+## 
+
+
+### Discover
+
+
+Perms: read
+
+Inputs: `null`
+
+Response:
+```json
+{
+  "info": {
+    "title": "Boost RPC API",
+    "version": "1.2.1/generated=2020-11-22T08:22:42-06:00"
+  },
+  "methods": [],
+  "openrpc": "1.2.6"
+}
+```
+
 ## Actor
 
 
@@ -274,7 +301,7 @@ Response: `{}`
 ### BoostDagstoreListShards
 
 
-Perms: read
+Perms: admin
 
 Inputs: `null`
 
@@ -377,6 +404,7 @@ Response:
     }
   },
   "IsOffline": true,
+  "CleanupData": true,
   "ClientPeerID": "12D3KooWGzxzKZYveHXtpG6AsrUJBcWxHBFS2HsEoGTxrMLvKXtf",
   "DealDataRoot": {
     "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
@@ -397,7 +425,9 @@ Response:
   "CheckpointAt": "0001-01-01T00:00:00Z",
   "Err": "string value",
   "Retry": "auto",
-  "NBytesReceived": 9
+  "NBytesReceived": 9,
+  "FastRetrieval": true,
+  "AnnounceToIPNI": true
 }
 ```
 
@@ -442,6 +472,7 @@ Response:
     }
   },
   "IsOffline": true,
+  "CleanupData": true,
   "ClientPeerID": "12D3KooWGzxzKZYveHXtpG6AsrUJBcWxHBFS2HsEoGTxrMLvKXtf",
   "DealDataRoot": {
     "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
@@ -462,7 +493,42 @@ Response:
   "CheckpointAt": "0001-01-01T00:00:00Z",
   "Err": "string value",
   "Retry": "auto",
-  "NBytesReceived": 9
+  "NBytesReceived": 9,
+  "FastRetrieval": true,
+  "AnnounceToIPNI": true
+}
+```
+
+### BoostDirectDeal
+
+
+Perms: admin
+
+Inputs:
+```json
+[
+  {
+    "DealUUID": "07070707-0707-0707-0707-070707070707",
+    "AllocationID": 0,
+    "PieceCid": {
+      "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
+    },
+    "ClientAddr": "f01234",
+    "StartEpoch": 10101,
+    "EndEpoch": 10101,
+    "FilePath": "string value",
+    "DeleteAfterImport": true,
+    "RemoveUnsealedCopy": true,
+    "SkipIPNIAnnounce": true
+  }
+]
+```
+
+Response:
+```json
+{
+  "Accepted": true,
+  "Reason": "string value"
 }
 ```
 
@@ -506,7 +572,9 @@ Inputs:
       "ClientID": "string value",
       "Params": "Ynl0ZSBhcnJheQ==",
       "Size": 42
-    }
+    },
+    "RemoveUnsealedCopy": true,
+    "SkipIPNIAnnounce": true
   }
 ]
 ```
@@ -528,6 +596,117 @@ Inputs: `null`
 
 Response: `{}`
 
+### BoostIndexerAnnounceLatest
+
+
+Perms: admin
+
+Inputs: `null`
+
+Response:
+```json
+{
+  "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
+}
+```
+
+### BoostIndexerAnnounceLatestHttp
+
+
+Perms: admin
+
+Inputs:
+```json
+[
+  [
+    "string value"
+  ]
+]
+```
+
+Response:
+```json
+{
+  "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
+}
+```
+
+### BoostIndexerListMultihashes
+
+
+Perms: admin
+
+Inputs:
+```json
+[
+  {
+    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
+  }
+]
+```
+
+Response:
+```json
+[
+  "Bw=="
+]
+```
+
+### BoostMakeDeal
+
+
+Perms: write
+
+Inputs:
+```json
+[
+  {
+    "DealUUID": "07070707-0707-0707-0707-070707070707",
+    "IsOffline": true,
+    "ClientDealProposal": {
+      "Proposal": {
+        "PieceCID": {
+          "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
+        },
+        "PieceSize": 1032,
+        "VerifiedDeal": true,
+        "Client": "f01234",
+        "Provider": "f01234",
+        "Label": "",
+        "StartEpoch": 10101,
+        "EndEpoch": 10101,
+        "StoragePricePerEpoch": "0",
+        "ProviderCollateral": "0",
+        "ClientCollateral": "0"
+      },
+      "ClientSignature": {
+        "Type": 2,
+        "Data": "Ynl0ZSBhcnJheQ=="
+      }
+    },
+    "DealDataRoot": {
+      "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
+    },
+    "Transfer": {
+      "Type": "string value",
+      "ClientID": "string value",
+      "Params": "Ynl0ZSBhcnJheQ==",
+      "Size": 42
+    },
+    "RemoveUnsealedCopy": true,
+    "SkipIPNIAnnounce": true
+  }
+]
+```
+
+Response:
+```json
+{
+  "Accepted": true,
+  "Reason": "string value"
+}
+```
+
 ### BoostOfflineDealWithData
 
 
@@ -537,7 +716,8 @@ Inputs:
 ```json
 [
   "07070707-0707-0707-0707-070707070707",
-  "string value"
+  "string value",
+  true
 ]
 ```
 
@@ -1186,7 +1366,9 @@ Response:
 ```json
 {
   "Reachability": 1,
-  "PublicAddr": "string value"
+  "PublicAddrs": [
+    "string value"
+  ]
 }
 ```
 
@@ -1643,13 +1825,30 @@ Response:
 }
 ```
 
-## Pieces
+## Online
 
 
-### PiecesGetCIDInfo
+### OnlineBackup
+There are not yet any comments for this method.
+
+Perms: admin
+
+Inputs:
+```json
+[
+  "string value"
+]
+```
+
+Response: `{}`
+
+## Pd
 
 
-Perms: read
+### PdBuildIndexForPieceCid
+There are not yet any comments for this method.
+
+Perms: admin
 
 Inputs:
 ```json
@@ -1660,102 +1859,7 @@ Inputs:
 ]
 ```
 
-Response:
-```json
-{
-  "CID": {
-    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-  },
-  "PieceBlockLocations": [
-    {
-      "RelOffset": 42,
-      "BlockSize": 42,
-      "PieceCID": {
-        "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-      }
-    }
-  ]
-}
-```
-
-### PiecesGetMaxOffset
-
-
-Perms: read
-
-Inputs:
-```json
-[
-  {
-    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-  }
-]
-```
-
-Response: `42`
-
-### PiecesGetPieceInfo
-
-
-Perms: read
-
-Inputs:
-```json
-[
-  {
-    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-  }
-]
-```
-
-Response:
-```json
-{
-  "PieceCID": {
-    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-  },
-  "Deals": [
-    {
-      "DealID": 5432,
-      "SectorID": 9,
-      "Offset": 1032,
-      "Length": 1032
-    }
-  ]
-}
-```
-
-### PiecesListCidInfos
-
-
-Perms: read
-
-Inputs: `null`
-
-Response:
-```json
-[
-  {
-    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-  }
-]
-```
-
-### PiecesListPieces
-
-
-Perms: read
-
-Inputs: `null`
-
-Response:
-```json
-[
-  {
-    "/": "bafy2bzacea3wsdh6y3a36tb3skempjoxqpuyompjbmfeyf34fi3uy6uue42v4"
-  }
-]
-```
+Response: `{}`
 
 ## Runtime
 

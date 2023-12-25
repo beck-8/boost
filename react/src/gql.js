@@ -69,16 +69,31 @@ const EpochQuery = gql`
     }
 `;
 
+const MinerAddressQuery = gql`
+    query AppMinerAddressQuery {
+        minerAddress
+    }
+`;
+
+const GraphsyncRetrievalMinerAddressesQuery = gql`
+    query AppGraphsyncRetrievalMinerAddressesQuery {
+        graphsyncRetrievalMinerAddresses
+    }
+`;
+
 const DealsListQuery = gql`
-    query AppDealsListQuery($query: String, $cursor: ID, $offset: Int, $limit: Int) {
-        deals(query: $query, cursor: $cursor, offset: $offset, limit: $limit) {
+    query AppDealsListQuery($query: String, $filter: DealFilter, $cursor: ID, $offset: Int, $limit: Int) {
+        deals(query: $query, filter: $filter, cursor: $cursor, offset: $offset, limit: $limit) {
             deals {
                 ID
                 CreatedAt
                 ClientAddress
                 Checkpoint
                 CheckpointAt
+                AnnounceToIPNI
+                KeepUnsealedCopy
                 IsOffline
+                CleanupData
                 Err
                 Retry
                 Message
@@ -130,6 +145,34 @@ const LegacyDealsListQuery = gql`
     }
 `;
 
+const DirectDealsListQuery = gql`
+    query AppDirectDealsListQuery($query: String, $filter: DealFilter, $cursor: ID, $offset: Int, $limit: Int) {
+        directDeals(query: $query, filter: $filter, cursor: $cursor, offset: $offset, limit: $limit) {
+            deals {
+                ID
+                CreatedAt
+                AllocationID
+                ClientAddress
+                Checkpoint
+                CheckpointAt
+                AnnounceToIPNI
+                KeepUnsealedCopy
+                CleanupData
+                Err
+                Retry
+                Message
+                Sector {
+                    ID
+                    Offset
+                    Length
+                }
+            }
+            totalCount
+            more
+        }
+    }
+`;
+
 const DealsCountQuery = gql`
     query AppDealCountQuery {
         dealsCount
@@ -139,6 +182,12 @@ const DealsCountQuery = gql`
 const LegacyDealsCountQuery = gql`
     query AppLegacyDealCountQuery {
         legacyDealsCount
+    }
+`;
+
+const DirectDealsCountQuery = gql`
+    query AppDirectDealCountQuery {
+        directDealsCount
     }
 `;
 
@@ -164,8 +213,11 @@ const DealSubscription = gql`
             ChainDealID
             PublishCid
             IsOffline
+            CleanupData
             Checkpoint
             CheckpointAt
+            AnnounceToIPNI
+            KeepUnsealedCopy
             Retry
             Err
             Message
@@ -217,6 +269,131 @@ const ProposalLogsCountQuery = gql`
     }
 `;
 
+const RetrievalLogQuery = gql`
+    query AppRetrievalLogQuery($peerID: String!, $transferID: Uint64!) {
+        retrievalLog(peerID: $peerID, transferID: $transferID) {
+            CreatedAt
+            UpdatedAt
+            PeerID
+            TransferID
+            DealID
+            PayloadCID
+            PieceCID
+            PaymentInterval
+            PaymentIntervalIncrease
+            PricePerByte
+            UnsealPrice
+            Status
+            Message
+            TotalSent
+            DTStatus
+            DTMessage
+            DTEvents {
+                CreatedAt
+                Name
+                Message
+            }
+            MarketEvents {
+                CreatedAt
+                Name
+                Status
+                Message
+            }
+        }
+    }
+`;
+
+const RetrievalLogsListQuery = gql`
+    query AppRetrievalLogsListQuery($isIndexer: Boolean, $cursor: Uint64, $offset: Int, $limit: Int) {
+        retrievalLogs(isIndexer: $isIndexer, cursor: $cursor, offset: $offset, limit: $limit) {
+            logs {
+                RowID
+                CreatedAt
+                UpdatedAt
+                PeerID
+                TransferID
+                DealID
+                PayloadCID
+                PieceCID
+                PaymentInterval
+                PaymentIntervalIncrease
+                PricePerByte
+                UnsealPrice
+                Status
+                Message
+                TotalSent
+                DTStatus
+                DTMessage
+            }
+            totalCount
+            more
+        }
+    }
+`;
+
+const RetrievalLogsCountQuery = gql`
+    query AppRetrievalLogsCountQuery($isIndexer: Boolean) {
+        retrievalLogsCount(isIndexer: $isIndexer) {
+            Count
+            Period
+        }
+    }
+`;
+
+const IpniProviderInfoQuery = gql`
+    query AppIpniProviderInfoQuery {
+        ipniProviderInfo {
+            PeerID
+            Config
+        }
+    }
+`;
+
+const IpniAdQuery = gql`
+    query AppIpniAdQuery($adCid: String!) {
+        ipniAdvertisement(adCid: $adCid) {
+            ContextID
+            Metadata {
+                Protocol
+                Metadata
+            }
+            PreviousEntry
+            Provider
+            Addresses
+            IsRemove
+            ExtendedProviders {
+                Override
+                Providers {
+                    ID
+                    Addresses
+                    Metadata {
+                        Protocol
+                        Metadata
+                    }
+                }
+            }
+        }
+    }
+`;
+
+const IpniAdEntriesQuery = gql`
+    query AppIpniAdEntriesQuery($adCid: String!) {
+        ipniAdvertisementEntries(adCid: $adCid)
+    }
+`;
+
+const IpniAdEntriesCountQuery = gql`
+    query AppIpniAdEntriesCountQuery($adCid: String!) {
+        ipniAdvertisementEntriesCount(adCid: $adCid)
+    }
+`;
+
+const IpniLatestAdQuery = gql`
+    query AppIpniLatestAdQuery {
+        ipniLatestAdvertisement
+    }
+`;
+
 const DealCancelMutation = gql`
     mutation AppDealCancelMutation($id: ID!) {
         dealCancel(id: $id)
@@ -243,6 +420,8 @@ const NewDealsSubscription = gql`
                 CreatedAt
                 PieceCid
                 PieceSize
+                AnnounceToIPNI
+                KeepUnsealedCopy
                 ClientAddress
                 StartEpoch
                 EndEpoch
@@ -306,9 +485,81 @@ const LegacyDealQuery = gql`
     }
 `;
 
+const DirectDealQuery = gql`
+    query AppDirectDealQuery($id: ID!) {
+        directDeal(id: $id) {
+            ID
+            CreatedAt
+            AllocationID
+            ClientAddress
+            ProviderAddress
+            PieceCid
+            PieceSize
+            StartEpoch
+            EndEpoch
+            InboundFilePath
+            Checkpoint
+            CheckpointAt
+            AnnounceToIPNI
+            KeepUnsealedCopy
+            CleanupData
+            Err
+            Retry
+            Message
+            Sector {
+                ID
+                Offset
+                Length
+            }
+            Logs {
+                CreatedAt
+                LogMsg
+                LogParams
+                Subsystem
+            }
+        }
+    }
+`;
+
+const PiecesWithRootPayloadCidQuery = gql`
+    query AppPiecesWithRootPayloadCidQuery($payloadCid: String!) {
+        piecesWithRootPayloadCid(payloadCid: $payloadCid)
+    }
+`;
+
 const PiecesWithPayloadCidQuery = gql`
     query AppPiecesWithPayloadCidQuery($payloadCid: String!) {
         piecesWithPayloadCid(payloadCid: $payloadCid)
+    }
+`;
+
+const FlaggedPiecesQuery = gql`
+    query AppFlaggedPiecesQuery($hasUnsealedCopy: Boolean, $cursor: BigInt, $offset: Int, $limit: Int) {
+        piecesFlagged(hasUnsealedCopy: $hasUnsealedCopy, cursor: $cursor, offset: $offset, limit: $limit) {
+            pieces {
+                CreatedAt
+                PieceCid
+                IndexStatus {
+                    Status
+                    Error
+                }
+                DealCount
+            }
+            totalCount
+            more
+        }
+    }
+`;
+
+const FlaggedPiecesCountQuery = gql`
+    query AppFlaggedPiecesCountQuery($hasUnsealedCopy: Boolean) {
+        piecesFlaggedCount(hasUnsealedCopy: $hasUnsealedCopy)
+    }
+`;
+
+const PieceBuildIndexMutation = gql`
+    mutation AppPieceBuildIndexMutation($pieceCid: String!) {
+        pieceBuildIndex(pieceCid: $pieceCid)
     }
 `;
 
@@ -322,7 +573,7 @@ const PieceStatusQuery = gql`
             }
             Deals {
                 SealStatus {
-                    IsUnsealed
+                    Status
                     Error
                 }
                 Deal {
@@ -338,6 +589,7 @@ const PieceStatusQuery = gql`
                 }
             }
             PieceInfoDeals {
+                MinerAddress
                 ChainDealID
                 Sector {
                     ID
@@ -345,10 +597,35 @@ const PieceStatusQuery = gql`
                     Length
                 }
                 SealStatus {
-                    IsUnsealed
+                    Status
                     Error
                 }
             }
+        }
+    }
+`;
+
+const LIDQuery = gql`
+    query AppLIDQuery {
+        lid {
+            ScanProgress {
+                Progress
+                LastScan
+            }
+            Pieces {
+                Indexed
+                FlaggedUnsealed
+                FlaggedSealed
+            }
+            SectorUnsealedCopies {
+                Unsealed
+                Sealed
+            }
+            SectorProvingState {
+                Active
+                Inactive
+            }
+            FlaggedPieces
         }
     }
 `;
@@ -496,6 +773,7 @@ const FundsLogsQuery = gql`
 const DealPublishQuery = gql`
     query AppDealPublishQuery {
         dealPublish {
+            ManualPSD
             Start
             Period
             MaxDealsPerMsg
@@ -532,18 +810,22 @@ const StorageAskUpdate = gql`
 `;
 
 const MpoolQuery = gql`
-    query AppMpoolQuery($local: Boolean!) {
-        mpool(local: $local) {
-            From
-            To
-            Nonce
-            Value
-            GasFeeCap
-            GasLimit
-            GasPremium
-            Method
-            Params
-            BaseFee
+    query AppMpoolQuery($alerts: Boolean!) {
+        mpool(alerts: $alerts) {
+            Count
+            Messages {
+                SentEpoch
+                From
+                To
+                Nonce
+                Value
+                GasFeeCap
+                GasLimit
+                GasPremium
+                Method
+                Params
+                BaseFee
+            }
         }
     }
 `;
@@ -571,14 +853,40 @@ const StorageAskQuery = gql`
     }
 `;
 
+const PublishPendingDealsMutation = gql`
+    mutation AppPublishPendingDealMutation($ids: [ID!]!) {
+        publishPendingDeals(ids: $ids)
+    }
+`;
+
+const PiecePayloadCidsQuery = gql`
+    query AppPiecePayloadCidsQuery($pieceCid: String!) {
+        piecePayloadCids(pieceCid: $pieceCid) {
+            PayloadCid
+            Multihash
+        }
+    }
+`;
+
+const IpniDistanceFromLatestAdQuery = gql`
+    query AppIpniDistanceFromLatestAdQuery($latestAdcid: String!, $adcid: String!) {
+        ipniDistanceFromLatestAd(LatestAdcid: $latestAdcid, Adcid: $adcid)
+    }
+`;
+
 export {
     gqlClient,
     EpochQuery,
+    MinerAddressQuery,
+    GraphsyncRetrievalMinerAddressesQuery,
     DealsListQuery,
     LegacyDealsListQuery,
+    DirectDealsListQuery,
     DealsCountQuery,
     LegacyDealsCountQuery,
+    DirectDealsCountQuery,
     LegacyDealQuery,
+    DirectDealQuery,
     DealSubscription,
     DealCancelMutation,
     DealRetryPausedMutation,
@@ -586,8 +894,21 @@ export {
     NewDealsSubscription,
     ProposalLogsListQuery,
     ProposalLogsCountQuery,
+    RetrievalLogQuery,
+    RetrievalLogsListQuery,
+    RetrievalLogsCountQuery,
+    IpniProviderInfoQuery,
+    IpniAdQuery,
+    IpniAdEntriesQuery,
+    IpniAdEntriesCountQuery,
+    IpniLatestAdQuery,
+    IpniDistanceFromLatestAdQuery,
     PiecesWithPayloadCidQuery,
+    PieceBuildIndexMutation,
     PieceStatusQuery,
+    FlaggedPiecesQuery,
+    FlaggedPiecesCountQuery,
+    LIDQuery,
     StorageQuery,
     LegacyStorageQuery,
     FundsQuery,
@@ -602,4 +923,6 @@ export {
     SealingPipelineQuery,
     Libp2pAddrInfoQuery,
     StorageAskQuery,
+    PublishPendingDealsMutation,
+    PiecePayloadCidsQuery,
 }

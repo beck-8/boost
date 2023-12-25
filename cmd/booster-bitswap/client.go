@@ -10,20 +10,26 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ipld/go-ipld-prime"
+	cidlink "github.com/ipld/go-ipld-prime/linking/cid"
+	"github.com/ipld/go-ipld-prime/traversal"
+	"github.com/libp2p/go-libp2p/core/host"
+	mh "github.com/multiformats/go-multihash"
+
 	"github.com/filecoin-project/boost/cmd/booster-bitswap/bitswap"
+	lotus_blockstore "github.com/filecoin-project/lotus/blockstore"
 	lcli "github.com/filecoin-project/lotus/cli"
-	"github.com/ipfs/go-bitswap/client"
-	bsnetwork "github.com/ipfs/go-bitswap/network"
+	"github.com/ipfs/boxo/bitswap/client"
+	bsnetwork "github.com/ipfs/boxo/bitswap/network"
+	nilrouting "github.com/ipfs/boxo/routing/none"
 	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
-	nilrouting "github.com/ipfs/go-ipfs-routing/none"
 	ipldlegacy "github.com/ipfs/go-ipld-legacy"
 	"github.com/ipld/go-car/v2/blockstore"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/p2p/muxer/mplex"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -84,14 +90,7 @@ var fetchCmd = &cli.Command{
 			return err
 		}
 
-		host, err := libp2p.New(
-			libp2p.Transport(tcp.NewTCPTransport),
-			libp2p.Transport(quic.NewTransport),
-			libp2p.Muxer("/mplex/6.7.0", mplex.DefaultTransport),
-			libp2p.Muxer("/yamux/1.0.0", yamux.DefaultTransport),
-			libp2p.Identity(privKey),
-			libp2p.ResourceManager(network.NullResourceManager),
-		)
+		host, err := createClientHost(privKey)
 		if err != nil {
 			return err
 		}
@@ -109,7 +108,8 @@ var fetchCmd = &cli.Command{
 
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		brn := &blockReceiver{bs: bs, ctx: ctx, cancel: cancel}
+		idbs := lotus_blockstore.WrapIDStore(bs)
+		brn := &blockReceiver{bs: idbs, ctx: ctx, cancel: cancel}
 		bsClient := client.New(ctx, net, bs, client.WithBlockReceivedNotifier(brn))
 		defer bsClient.Close()
 		net.Start(bsClient)
@@ -132,7 +132,7 @@ var fetchCmd = &cli.Command{
 			return protos[i] < protos[j]
 		})
 		log.Debugw("host libp2p protocols", "protocols", protos)
-		p, err := host.Peerstore().FirstSupportedProtocol(serverAddrInfo.ID, bitswap.ProtocolStrings...)
+		p, err := host.Peerstore().FirstSupportedProtocol(serverAddrInfo.ID, bitswap.Protocols...)
 		if err != nil {
 			return fmt.Errorf("getting first supported protocol from peer store for %s: %w", serverAddrInfo.ID, err)
 		}
@@ -162,37 +162,62 @@ var fetchCmd = &cli.Command{
 	},
 }
 
+func createClientHost(privKey crypto.PrivKey) (host.Host, error) {
+	return libp2p.New(
+		libp2p.Transport(tcp.NewTCPTransport),
+		libp2p.Transport(quic.NewTransport),
+		libp2p.Muxer("/yamux/1.0.0", yamux.DefaultTransport),
+		libp2p.Identity(privKey),
+		libp2p.ResourceManager(&network.NullResourceManager{}),
+	)
+}
+
 func getBlocks(ctx context.Context, bsClient *client.Client, c cid.Cid, throttle chan struct{}) (uint64, uint64, error) {
-	if throttle != nil {
-		throttle <- struct{}{}
-	}
-	// Get the block
-	start := time.Now()
-	blk, err := bsClient.GetBlock(ctx, c)
-	if throttle != nil {
-		<-throttle
-	}
-	if err != nil {
-		return 0, 0, err
+	var size uint64
+	var links []cid.Cid
+	if c.Prefix().MhType == mh.IDENTITY {
+		var err error
+		size, links, err = getIDBlock(c)
+		if err != nil {
+			return 0, 0, err
+		}
+	} else {
+		if throttle != nil {
+			throttle <- struct{}{}
+		}
+		// Get the block
+		start := time.Now()
+		blk, err := bsClient.GetBlock(ctx, c)
+		if throttle != nil {
+			<-throttle
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+
+		size = uint64(len(blk.RawData()))
+		log.Debugw("receive", "cid", c, "size", size, "duration", time.Since(start).String())
+
+		// Read the links from the block to child nodes in the DAG
+		ipldDecoder := ipldlegacy.NewDecoder()
+		nd, err := ipldDecoder.DecodeNode(ctx, blk)
+		if err != nil {
+			return 0, 0, fmt.Errorf("decoding node %s: %w", c, err)
+		}
+
+		ndLinks := nd.Links()
+		for _, l := range ndLinks {
+			links = append(links, l.Cid)
+		}
 	}
 
-	var size = uint64(len(blk.RawData()))
-	log.Debugw("receive", "cid", c, "size", size, "duration", time.Since(start).String())
-
-	// Read the links from the block to child nodes in the DAG
 	var count = uint64(1)
-	nd, err := ipldlegacy.DecodeNode(ctx, blk)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decoding node %s: %w", c, err)
-	}
-
 	var eg errgroup.Group
-	lnks := nd.Links()
-	for _, l := range lnks {
-		l := l
+	for _, link := range links {
+		link := link
 		// Launch a go routine to fetch the blocks underneath each link
 		eg.Go(func() error {
-			cnt, sz, err := getBlocks(ctx, bsClient, l.Cid, throttle)
+			cnt, sz, err := getBlocks(ctx, bsClient, link, throttle)
 			if err != nil {
 				return err
 			}
@@ -205,8 +230,38 @@ func getBlocks(ctx context.Context, bsClient *client.Client, c cid.Cid, throttle
 	return count, size, eg.Wait()
 }
 
+func getIDBlock(c cid.Cid) (uint64, []cid.Cid, error) {
+	dmh, err := mh.Decode(c.Hash())
+	if err != nil {
+		return 0, nil, err
+	}
+
+	if dmh.Code != mh.IDENTITY {
+		return 0, nil, fmt.Errorf("bad cid: multihash type identity but decoded mh is not identity")
+	}
+
+	decoder, err := cidlink.DefaultLinkSystem().DecoderChooser(cidlink.Link{Cid: c})
+	if err != nil {
+		return 0, nil, fmt.Errorf("choosing decoder for identity CID %s: %w", c, err)
+	}
+	node, err := ipld.Decode(dmh.Digest, decoder)
+	if err != nil {
+		return 0, nil, fmt.Errorf("decoding identity CID %s: %w", c, err)
+	}
+	links, err := traversal.SelectLinks(node)
+	if err != nil {
+		return 0, nil, fmt.Errorf("collecting links from identity CID %s: %w", c, err)
+	}
+	// convert from Link to Cid
+	resultCids := make([]cid.Cid, 0)
+	for _, link_ := range links {
+		resultCids = append(resultCids, link_.(cidlink.Link).Cid)
+	}
+	return uint64(len(dmh.Digest)), resultCids, nil
+}
+
 type blockReceiver struct {
-	bs     *blockstore.ReadWrite
+	bs     lotus_blockstore.Blockstore
 	ctx    context.Context
 	cancel context.CancelFunc
 }

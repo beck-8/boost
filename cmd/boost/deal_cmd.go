@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -43,15 +44,14 @@ var dealFlags = []cli.Flag{
 		Usage:    "size of the CAR file as a padded piece",
 		Required: true,
 	},
-	&cli.Uint64Flag{
-		Name:     "car-size",
-		Usage:    "size of the CAR file",
-		Required: true,
-	},
 	&cli.StringFlag{
 		Name:     "payload-cid",
 		Usage:    "root CID of the CAR file",
 		Required: true,
+	},
+	&cli.IntFlag{
+		Name:  "start-epoch-head-offset",
+		Usage: "start epoch by when the deal should be proved by provider on-chain after current chain head",
 	},
 	&cli.IntFlag{
 		Name:  "start-epoch",
@@ -76,6 +76,11 @@ var dealFlags = []cli.Flag{
 		Usage: "whether the deal funds should come from verified client data-cap",
 		Value: true,
 	},
+	&cli.BoolFlag{
+		Name:  "remove-unsealed-copy",
+		Usage: "indicates that an unsealed copy of the sector in not required for fast retrieval",
+		Value: false,
+	},
 	&cli.StringFlag{
 		Name:  "wallet",
 		Usage: "wallet address to be used to initiate the deal",
@@ -83,6 +88,11 @@ var dealFlags = []cli.Flag{
 	&cli.StringFlag{
 		Name:  "filename",
 		Usage: "specify filename, output filename",
+	},
+	&cli.BoolFlag{
+		Name:  "skip-ipni-announce",
+		Usage: "indicates that deal index should not be announced to the IPNI(Network Indexer)",
+		Value: false,
 	},
 }
 
@@ -98,6 +108,11 @@ var dealCmd = &cli.Command{
 		&cli.StringSliceFlag{
 			Name:  "http-headers",
 			Usage: "http headers to be passed with the request (e.g key=value)",
+		},
+		&cli.Uint64Flag{
+			Name:     "car-size",
+			Usage:    "size of the CAR file: required for online deals",
+			Required: true,
 		},
 	}, dealFlags...),
 	Before: before,
@@ -181,15 +196,15 @@ func dealCmdAction(cctx *cli.Context, isOnline bool) error {
 		return fmt.Errorf("parsing payload cid %s: %w", payloadCidStr, err)
 	}
 
-	carFileSize := cctx.Uint64("car-size")
-	if carFileSize == 0 {
-		return fmt.Errorf("size of car file cannot be 0")
-	}
-
-	transfer := types.Transfer{
-		Size: carFileSize,
-	}
+	transfer := types.Transfer{}
 	if isOnline {
+
+		carFileSize := cctx.Uint64("car-size")
+		if carFileSize == 0 {
+			return fmt.Errorf("size of car file cannot be 0")
+		}
+
+		transfer.Size = carFileSize
 		// Store the path to the CAR file as a transfer parameter
 		transferParams := &types2.HttpRequest{URL: cctx.String("http-url")}
 
@@ -226,19 +241,26 @@ func dealCmdAction(cctx *cli.Context, isOnline bool) error {
 		providerCollateral = big.Div(big.Mul(bounds.Min, big.NewInt(6)), big.NewInt(5)) // add 20%
 	}
 
+	tipset, err := api.ChainHead(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot get chain head: %w", err)
+	}
+
+	head := tipset.Height()
+	log.Debugw("current block height", "number", head)
+
+	if cctx.IsSet("start-epoch") && cctx.IsSet("start-epoch-head-offset") {
+		return errors.New("only one flag from `start-epoch-head-offset' or `start-epoch` can be specified")
+	}
+
 	var startEpoch abi.ChainEpoch
-	if cctx.IsSet("start-epoch") {
+
+	if cctx.IsSet("start-epoch-head-offset") {
+		startEpoch = head + abi.ChainEpoch(cctx.Int("start-epoch-head-offset"))
+	} else if cctx.IsSet("start-epoch") {
 		startEpoch = abi.ChainEpoch(cctx.Int("start-epoch"))
 	} else {
-		tipset, err := api.ChainHead(ctx)
-		if err != nil {
-			return fmt.Errorf("getting chain head: %w", err)
-		}
-
-		head := tipset.Height()
-
-		log.Debugw("current block height", "number", head)
-
+		// default
 		startEpoch = head + abi.ChainEpoch(5760) // head + 2 days
 	}
 
@@ -254,6 +276,8 @@ func dealCmdAction(cctx *cli.Context, isOnline bool) error {
 		DealDataRoot:       rootCid,
 		IsOffline:          !isOnline,
 		Transfer:           transfer,
+		RemoveUnsealedCopy: cctx.Bool("remove-unsealed-copy"),
+		SkipIPNIAnnounce:   cctx.Bool("skip-ipni-announce"),
 	}
 
 	log.Debugw("about to submit deal proposal", "uuid", dealUuid.String())

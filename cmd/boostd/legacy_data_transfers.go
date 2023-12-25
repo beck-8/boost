@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	bapi "github.com/filecoin-project/boost/api"
+	datatransferv2 "github.com/filecoin-project/go-data-transfer/v2"
+	"github.com/filecoin-project/lotus/api"
 	"os"
 	"strconv"
 	"time"
@@ -30,8 +33,9 @@ var dataTransfersCmd = &cli.Command{
 }
 
 var marketRestartTransfer = &cli.Command{
-	Name:  "restart",
-	Usage: "Force restart a stalled data transfer",
+	Name:      "restart",
+	Usage:     "Force restart a stalled data transfer",
+	ArgsUsage: "<transfer id>",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:  "peerid",
@@ -90,8 +94,9 @@ var marketRestartTransfer = &cli.Command{
 }
 
 var marketCancelTransfer = &cli.Command{
-	Name:  "cancel",
-	Usage: "Force cancel a data transfer",
+	Name:      "cancel",
+	Usage:     "Force cancel a data transfer",
+	ArgsUsage: "<transfer id>",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:  "peerid",
@@ -206,7 +211,7 @@ var transfersListCmd = &cli.Command{
 
 				tm.MoveCursor(1, 1)
 
-				lcli.OutputDataTransferChannels(tm.Screen, channels, verbose, completed, showFailed)
+				lcli.OutputDataTransferChannels(tm.Screen, toDTv2Channels(channels), verbose, completed, showFailed)
 
 				tm.Flush()
 
@@ -231,15 +236,66 @@ var transfersListCmd = &cli.Command{
 				}
 			}
 		}
-		lcli.OutputDataTransferChannels(os.Stdout, channels, verbose, completed, showFailed)
+		lcli.OutputDataTransferChannels(os.Stdout, toDTv2Channels(channels), verbose, completed, showFailed)
 		return nil
 	},
 }
 
+func toDTv2Channels(channels []bapi.DataTransferChannel) []api.DataTransferChannel {
+	v2chs := make([]api.DataTransferChannel, 0, len(channels))
+	for _, ch := range channels {
+		v2chs = append(v2chs, api.DataTransferChannel{
+			TransferID:  datatransferv2.TransferID(ch.TransferID),
+			Status:      datatransferv2.Status(ch.Status),
+			BaseCID:     ch.BaseCID,
+			IsInitiator: ch.IsInitiator,
+			IsSender:    ch.IsSender,
+			Voucher:     ch.Voucher,
+			Message:     ch.Message,
+			OtherPeer:   ch.OtherPeer,
+			Transferred: ch.Transferred,
+			Stages:      toDTv2Stages(ch.Stages),
+		})
+	}
+	return v2chs
+}
+
+func toDTv2Stages(stages *datatransfer.ChannelStages) *datatransferv2.ChannelStages {
+	if stages == nil {
+		return nil
+	}
+
+	v2stgs := make([]*datatransferv2.ChannelStage, 0, len(stages.Stages))
+	for _, s := range stages.Stages {
+		v2stgs = append(v2stgs, &datatransferv2.ChannelStage{
+			Name:        s.Name,
+			Description: s.Description,
+			CreatedTime: s.CreatedTime,
+			UpdatedTime: s.UpdatedTime,
+			Logs:        toDTv2Logs(s.Logs),
+		})
+	}
+	return &datatransferv2.ChannelStages{Stages: v2stgs}
+}
+
+func toDTv2Logs(logs []*datatransfer.Log) []*datatransferv2.Log {
+	if logs == nil {
+		return nil
+	}
+
+	v2logs := make([]*datatransferv2.Log, 0, len(logs))
+	for _, l := range logs {
+		v2logs = append(v2logs, &datatransferv2.Log{Log: l.Log, UpdatedTime: l.UpdatedTime})
+	}
+
+	return v2logs
+}
+
 var transfersDiagnosticsCmd = &cli.Command{
-	Name:  "diagnostics",
-	Usage: "Get detailed diagnostics on active transfers with a specific peer",
-	Flags: []cli.Flag{},
+	Name:      "diagnostics",
+	Usage:     "Get detailed diagnostics on active transfers with a specific peer",
+	ArgsUsage: "<peer id>",
+	Flags:     []cli.Flag{},
 	Action: func(cctx *cli.Context) error {
 		if !cctx.Args().Present() {
 			return cli.ShowCommandHelp(cctx, cctx.Command.Name)

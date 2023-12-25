@@ -14,10 +14,11 @@ import (
 	"github.com/chzyer/readline"
 	"github.com/dustin/go-humanize"
 	"github.com/filecoin-project/boost/api"
-	"github.com/filecoin-project/boost/cli/ctxutil"
 	cliutil "github.com/filecoin-project/boost/cli/util"
-	"github.com/filecoin-project/boost/node"
+	scliutil "github.com/filecoin-project/boost/extern/boostd-data/shared/cliutil"
 	"github.com/filecoin-project/boost/node/config"
+	"github.com/filecoin-project/boost/node/impl/backupmgr"
+	"github.com/filecoin-project/boost/node/repo"
 	"github.com/filecoin-project/boost/util"
 	"github.com/filecoin-project/go-address"
 	lapi "github.com/filecoin-project/lotus/api"
@@ -70,14 +71,14 @@ var initCmd = &cli.Command{
 	}...),
 	Before: before,
 	Action: func(cctx *cli.Context) error {
-		ctx := ctxutil.ReqContext(cctx)
+		ctx := scliutil.ReqContext(cctx)
 
 		bp, err := initBoost(ctx, cctx, nil)
 		if err != nil {
 			return err
 		}
 
-		lr, err := bp.repo.Lock(node.Boost)
+		lr, err := bp.repo.Lock(repo.Boost)
 		if err != nil {
 			return err
 		}
@@ -109,6 +110,24 @@ var initCmd = &cli.Command{
 		}
 		if err != nil {
 			return fmt.Errorf("setting config: %w", err)
+		}
+
+		// Add comments to config
+		c, err := lr.Config()
+		if err != nil {
+			return fmt.Errorf("getting config: %w", err)
+		}
+		curCfg, ok := c.(*config.Boost)
+		if !ok {
+			return fmt.Errorf("parsing config from boost repo")
+		}
+		newCfg, err := config.ConfigUpdate(curCfg, config.DefaultBoost(), true, false)
+		if err != nil {
+			return err
+		}
+		err = os.WriteFile(path.Join(lr.Path(), "config.toml"), newCfg, 0644)
+		if err != nil {
+			return fmt.Errorf("writing config file %s: %w", string(newCfg), err)
 		}
 
 		// Add the miner address to the metadata datastore
@@ -185,7 +204,7 @@ var migrateMonolithCmd = &cli.Command{
 }
 
 func migrate(cctx *cli.Context, fromMonolith bool, mktsRepoPath string) error {
-	ctx := ctxutil.ReqContext(cctx)
+	ctx := scliutil.ReqContext(cctx)
 
 	// Open markets repo
 	fmt.Printf("Opening repo '%s'\n", mktsRepoPath)
@@ -201,7 +220,7 @@ func migrate(cctx *cli.Context, fromMonolith bool, mktsRepoPath string) error {
 		return err
 	}
 
-	boostRepo, err := bp.repo.Lock(node.Boost)
+	boostRepo, err := bp.repo.Lock(repo.Boost)
 	if err != nil {
 		return err
 	}
@@ -221,7 +240,7 @@ func migrate(cctx *cli.Context, fromMonolith bool, mktsRepoPath string) error {
 
 	// Migrate keystore
 	fmt.Println("Migrating keystore")
-	err = migrateMarketsKeystore(mktsRepo, boostRepo)
+	err = backupmgr.CopyKeysBetweenRepos(mktsRepo, boostRepo)
 	if err != nil {
 		return err
 	}
@@ -481,18 +500,19 @@ func migrateMarketsConfig(cctx *cli.Context, mktsRepo lotus_repo.LockedRepo, boo
 		}
 		rcfg.Common.Backup = mktsCfg.Common.Backup
 		rcfg.Common.Libp2p = mktsCfg.Common.Libp2p
-		rcfg.Storage = config.StorageConfig{ParallelFetchLimit: mktsCfg.Storage.ParallelFetchLimit}
+		rcfg.Storage.ParallelFetchLimit = mktsCfg.Storage.ParallelFetchLimit
 		setBoostDealMakingCfg(&rcfg.Dealmaking, mktsCfg)
 		rcfg.LotusDealmaking = mktsCfg.Dealmaking
-		rcfg.LotusFees = config.FeeConfig{
-			MaxPublishDealsFee:     mktsCfg.Fees.MaxPublishDealsFee,
-			MaxMarketBalanceAddFee: mktsCfg.Fees.MaxMarketBalanceAddFee,
-		}
+		rcfg.LotusFees.MaxMarketBalanceAddFee = mktsCfg.Fees.MaxMarketBalanceAddFee
+		rcfg.LotusFees.MaxPublishDealsFee = mktsCfg.Fees.MaxPublishDealsFee
 		rcfg.DAGStore = mktsCfg.DAGStore
 		// Clear the DAG store root dir config, because the DAG store is no longer configurable in Boost
 		// (it is always at <repo path>/dagstore
 		rcfg.DAGStore.RootDir = ""
-		rcfg.IndexProvider = mktsCfg.IndexProvider
+		rcfg.IndexProvider.EntriesCacheCapacity = mktsCfg.IndexProvider.EntriesCacheCapacity
+		rcfg.IndexProvider.EntriesChunkSize = mktsCfg.IndexProvider.EntriesChunkSize
+		rcfg.IndexProvider.TopicName = mktsCfg.IndexProvider.TopicName
+		rcfg.IndexProvider.PurgeCacheOnStart = mktsCfg.IndexProvider.PurgeCacheOnStart
 		rcfg.IndexProvider.Enable = true // Enable index provider in Boost by default
 
 		if fromMonolith {
@@ -624,7 +644,7 @@ func initBoost(ctx context.Context, cctx *cli.Context, marketsRepo lotus_repo.Lo
 	}
 
 	fmt.Println("Creating boost repo")
-	if err := r.Init(node.Boost); err != nil {
+	if err := r.Init(repo.Boost); err != nil {
 		return nil, err
 	}
 
@@ -801,36 +821,6 @@ func importPrefix(ctx context.Context, prefix string, mktsDS datastore.Batching,
 			return nil
 		}
 	}
-}
-
-func migrateMarketsKeystore(mktsRepo lotus_repo.LockedRepo, boostRepo lotus_repo.LockedRepo) error {
-	boostKS, err := boostRepo.KeyStore()
-	if err != nil {
-		return err
-	}
-
-	mktsKS, err := mktsRepo.KeyStore()
-	if err != nil {
-		return err
-	}
-
-	keys, err := mktsKS.List()
-	if err != nil {
-		return err
-	}
-
-	for _, k := range keys {
-		ki, err := mktsKS.Get(k)
-		if err != nil {
-			return err
-		}
-		err = boostKS.Put(k, ki)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // checkV1ApiSupport uses v0 api version to signal support for v1 API

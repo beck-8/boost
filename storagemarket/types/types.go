@@ -7,24 +7,23 @@ import (
 	"io"
 	"net/url"
 
-	"github.com/filecoin-project/boost/sealingpipeline"
+	"github.com/filecoin-project/boost-gfm/storagemarket"
 	"github.com/filecoin-project/boost/transport/httptransport/util"
 	"github.com/filecoin-project/boost/transport/types"
 	"github.com/filecoin-project/go-address"
-	"github.com/filecoin-project/go-fil-markets/shared"
-	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	multiaddrutil "github.com/filecoin-project/go-legs/httpsync/multiaddr"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/builtin/v9/market"
+	"github.com/filecoin-project/go-state-types/builtin/v9/verifreg"
 	"github.com/filecoin-project/go-state-types/crypto"
 	"github.com/filecoin-project/lotus/api"
-	"github.com/filecoin-project/specs-storage/storage"
+	"github.com/filecoin-project/lotus/storage/sealer/storiface"
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
+	"github.com/ipni/go-libipni/maurl"
 )
 
-//go:generate cbor-gen-for --map-encoding StorageAsk DealParams Transfer DealResponse DealStatusRequest DealStatusResponse DealStatus
-//go:generate go run github.com/golang/mock/mockgen -destination=mock_types/mocks.go -package=mock_types . PieceAdder,CommpCalculator,DealPublisher,ChainDealManager
+//go:generate cbor-gen-for --map-encoding StorageAsk DealParamsV120 DealParams DirectDealParams Transfer DealResponse DealStatusRequest DealStatusResponse DealStatus
+//go:generate go run github.com/golang/mock/mockgen -destination=mock_types/mocks.go -package=mock_types . PieceAdder,CommpCalculator,DealPublisher,ChainDealManager,IndexProvider
 
 // StorageAsk defines the parameters by which a miner will choose to accept or
 // reject a deal. Note: making a storage deal proposal which matches the miner's
@@ -83,11 +82,21 @@ type DealParams struct {
 	ClientDealProposal market.ClientDealProposal
 	DealDataRoot       cid.Cid
 	Transfer           Transfer // Transfer params will be the zero value if this is an offline deal
+	RemoveUnsealedCopy bool
+	SkipIPNIAnnounce   bool
 }
 
-type DealFilterParams struct {
-	DealParams           *DealParams
-	SealingPipelineState *sealingpipeline.Status
+type DirectDealParams struct {
+	DealUUID           uuid.UUID
+	AllocationID       verifreg.AllocationId
+	PieceCid           cid.Cid
+	ClientAddr         address.Address
+	StartEpoch         abi.ChainEpoch
+	EndEpoch           abi.ChainEpoch
+	FilePath           string
+	DeleteAfterImport  bool
+	RemoveUnsealedCopy bool
+	SkipIPNIAnnounce   bool
 }
 
 // Transfer has the parameters for a data transfer
@@ -123,7 +132,7 @@ func (t *Transfer) Host() (string, error) {
 	// If the url is in libp2p format
 	if u.Scheme == util.Libp2pScheme {
 		// Get the host from the multiaddr
-		mahttp, err := multiaddrutil.ToURL(u.Multiaddr)
+		mahttp, err := maurl.ToURL(u.Multiaddr)
 		if err != nil {
 			return "", err
 		}
@@ -151,7 +160,7 @@ type PieceAdder interface {
 }
 
 type CommpCalculator interface {
-	ComputeDataCid(ctx context.Context, pieceSize abi.UnpaddedPieceSize, pieceData storage.Data) (abi.PieceInfo, error)
+	ComputeDataCid(ctx context.Context, pieceSize abi.UnpaddedPieceSize, pieceData storiface.Data) (abi.PieceInfo, error)
 }
 
 type DealPublisher interface {
@@ -173,5 +182,5 @@ type AskGetter interface {
 }
 
 type SignatureVerifier interface {
-	VerifySignature(ctx context.Context, sig crypto.Signature, addr address.Address, input []byte, encodedTs shared.TipSetToken) (bool, error)
+	VerifySignature(ctx context.Context, sig crypto.Signature, addr address.Address, input []byte) (bool, error)
 }

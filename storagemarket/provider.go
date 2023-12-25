@@ -10,29 +10,27 @@ import (
 	"sync"
 	"time"
 
+	"github.com/filecoin-project/boost-gfm/storagemarket"
 	"github.com/filecoin-project/boost/api"
 	"github.com/filecoin-project/boost/build"
 	"github.com/filecoin-project/boost/db"
 	"github.com/filecoin-project/boost/db/migrations"
+	"github.com/filecoin-project/boost/extern/boostd-data/shared/tracing"
 	"github.com/filecoin-project/boost/fundmanager"
 	"github.com/filecoin-project/boost/node/modules/dtypes"
-	"github.com/filecoin-project/boost/sealingpipeline"
+	"github.com/filecoin-project/boost/piecedirectory"
 	"github.com/filecoin-project/boost/storagemanager"
 	"github.com/filecoin-project/boost/storagemarket/logs"
+	"github.com/filecoin-project/boost/storagemarket/sealingpipeline"
 	"github.com/filecoin-project/boost/storagemarket/types"
 	smtypes "github.com/filecoin-project/boost/storagemarket/types"
 	"github.com/filecoin-project/boost/storagemarket/types/dealcheckpoints"
-	"github.com/filecoin-project/boost/tracing"
 	"github.com/filecoin-project/boost/transport"
+	"github.com/filecoin-project/dagstore"
 	"github.com/filecoin-project/go-address"
-	"github.com/filecoin-project/go-fil-markets/piecestore"
-	"github.com/filecoin-project/go-fil-markets/shared"
-	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/go-fil-markets/stores"
+	"github.com/filecoin-project/go-state-types/abi"
 	lapi "github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/api/v1api"
-	ctypes "github.com/filecoin-project/lotus/chain/types"
-	"github.com/filecoin-project/lotus/markets/utils"
 	sealing "github.com/filecoin-project/lotus/storage/pipeline"
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
@@ -45,6 +43,7 @@ import (
 var (
 	ErrDealNotFound        = fmt.Errorf("deal not found")
 	ErrDealHandlerNotFound = errors.New("deal handler not found")
+	ErrDealNotInSector     = errors.New("storage failed - deal not found in sector")
 )
 
 var (
@@ -52,14 +51,29 @@ var (
 	addPieceRetryTimeout = 6 * time.Hour
 )
 
+type SealingPipelineCache struct {
+	Status     sealingpipeline.Status
+	CacheTime  time.Time
+	CacheError error
+}
+
+// DagstoreShardRegistry provides the one method from the Dagstore that we use
+// in deal execution: registering a shard
+type DagstoreShardRegistry interface {
+	RegisterShard(ctx context.Context, pieceCid cid.Cid, carPath string, eagerInit bool, resch chan dagstore.ShardResult) error
+}
+
 type Config struct {
 	// The maximum amount of time a transfer can take before it fails
 	MaxTransferDuration time.Duration
 	// Whether to do commp on the Boost node (local) or the sealing node (remote)
-	RemoteCommp bool
-	// The number of commp processes that can run in parallel
-	MaxConcurrentLocalCommp uint64
-	TransferLimiter         TransferLimiterConfig
+	RemoteCommp     bool
+	TransferLimiter TransferLimiterConfig
+	// Cleanup deal logs from DB older than this many number of days
+	DealLogDurationDays int
+	// Cache timeout for Sealing Pipeline status
+	SealingPipelineCacheTimeout time.Duration
+	StorageFilter               string
 }
 
 var log = logging.Logger("boost-provider")
@@ -82,9 +96,11 @@ type Provider struct {
 	publishedDealChan    chan publishDealReq
 	updateRetryStateChan chan updateRetryStateReq
 	storageSpaceChan     chan storageSpaceDealReq
+	processedDealChan    chan processedDealReq
 
 	// Sealing Pipeline API
-	sps sealingpipeline.API
+	sps      sealingpipeline.API
+	spsCache SealingPipelineCache
 
 	// Boost deal filter
 	df dtypes.StorageDealFilter
@@ -103,7 +119,7 @@ type Provider struct {
 	transfers      *dealTransfers
 
 	pieceAdder                  types.PieceAdder
-	commpThrottle               chan struct{}
+	commpThrottle               CommpThrottle
 	commpCalc                   smtypes.CommpCalculator
 	maxDealCollateralMultiplier uint64
 	chainDealManager            types.ChainDealManager
@@ -115,18 +131,16 @@ type Provider struct {
 
 	dealLogger *logs.DealLogger
 
-	dagst stores.DAGStoreWrapper
-	ps    piecestore.PieceStore
-
-	ip          types.IndexProvider
-	askGetter   types.AskGetter
-	sigVerifier types.SignatureVerifier
+	piecedirectory *piecedirectory.PieceDirectory
+	ip             types.IndexProvider
+	askGetter      types.AskGetter
+	sigVerifier    types.SignatureVerifier
 }
 
 func NewProvider(cfg Config, sqldb *sql.DB, dealsDB *db.DealsDB, fundMgr *fundmanager.FundManager, storageMgr *storagemanager.StorageManager,
-	fullnodeApi v1api.FullNode, dp types.DealPublisher, addr address.Address, pa types.PieceAdder, commpCalc smtypes.CommpCalculator,
+	fullnodeApi v1api.FullNode, dp types.DealPublisher, addr address.Address, pa types.PieceAdder, commpCalc smtypes.CommpCalculator, commpThrottle CommpThrottle,
 	sps sealingpipeline.API, cm types.ChainDealManager, df dtypes.StorageDealFilter, logsSqlDB *sql.DB, logsDB *db.LogsDB,
-	dagst stores.DAGStoreWrapper, ps piecestore.PieceStore, ip types.IndexProvider, askGetter types.AskGetter,
+	piecedirectory *piecedirectory.PieceDirectory, ip types.IndexProvider, askGetter types.AskGetter,
 	sigVerifier types.SignatureVerifier, dl *logs.DealLogger, tspt transport.Transport) (*Provider, error) {
 
 	xferLimiter, err := newTransferLimiter(cfg.TransferLimiter)
@@ -140,9 +154,8 @@ func NewProvider(cfg Config, sqldb *sql.DB, dealsDB *db.DealsDB, fundMgr *fundma
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Make sure that max concurrent local commp is at least 1
-	if cfg.MaxConcurrentLocalCommp == 0 {
-		cfg.MaxConcurrentLocalCommp = 1
+	if cfg.SealingPipelineCacheTimeout < 0 {
+		cfg.SealingPipelineCacheTimeout = 30 * time.Second
 	}
 
 	return &Provider{
@@ -155,6 +168,7 @@ func NewProvider(cfg Config, sqldb *sql.DB, dealsDB *db.DealsDB, fundMgr *fundma
 		dealsDB:   dealsDB,
 		logsSqlDB: logsSqlDB,
 		sps:       sps,
+		spsCache:  SealingPipelineCache{},
 		df:        df,
 
 		acceptDealChan:       make(chan acceptDealReq),
@@ -162,6 +176,7 @@ func NewProvider(cfg Config, sqldb *sql.DB, dealsDB *db.DealsDB, fundMgr *fundma
 		publishedDealChan:    make(chan publishDealReq),
 		updateRetryStateChan: make(chan updateRetryStateReq),
 		storageSpaceChan:     make(chan storageSpaceDealReq),
+		processedDealChan:    make(chan processedDealReq),
 
 		Transport:      tspt,
 		xferLimiter:    xferLimiter,
@@ -171,7 +186,7 @@ func NewProvider(cfg Config, sqldb *sql.DB, dealsDB *db.DealsDB, fundMgr *fundma
 		dealPublisher:               dp,
 		fullnodeApi:                 fullnodeApi,
 		pieceAdder:                  pa,
-		commpThrottle:               make(chan struct{}, cfg.MaxConcurrentLocalCommp),
+		commpThrottle:               commpThrottle,
 		commpCalc:                   commpCalc,
 		chainDealManager:            cm,
 		maxDealCollateralMultiplier: 2,
@@ -181,12 +196,10 @@ func NewProvider(cfg Config, sqldb *sql.DB, dealsDB *db.DealsDB, fundMgr *fundma
 		dealLogger: dl,
 		logsDB:     logsDB,
 
-		dagst: dagst,
-		ps:    ps,
-
-		ip:          ip,
-		askGetter:   askGetter,
-		sigVerifier: sigVerifier,
+		piecedirectory: piecedirectory,
+		ip:             ip,
+		askGetter:      askGetter,
+		sigVerifier:    sigVerifier,
 	}, nil
 }
 
@@ -216,10 +229,10 @@ func (p *Provider) GetAsk() *storagemarket.SignedStorageAsk {
 
 // ImportOfflineDealData is called when the Storage Provider imports data for
 // an offline deal (the deal must already have been proposed by the client)
-func (p *Provider) ImportOfflineDealData(ctx context.Context, dealUuid uuid.UUID, filePath string) (pi *api.ProviderDealRejectionInfo, err error) {
-	p.dealLogger.Infow(dealUuid, "import data for offline deal", "filepath", filePath)
+func (p *Provider) ImportOfflineDealData(ctx context.Context, dealUuid uuid.UUID, filePath string, delAfterImport bool) (pi *api.ProviderDealRejectionInfo, err error) {
+	p.dealLogger.Infow(dealUuid, "import data for offline deal", "filepath", filePath, "delete after import", delAfterImport)
 
-	// db should already have a deal with this uuid as the deal proposal should have been agreed before hand
+	// db should already have a deal with this uuid as the deal proposal should have been made beforehand
 	ds, err := p.dealsDB.ByID(p.ctx, dealUuid)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -235,6 +248,7 @@ func (p *Provider) ImportOfflineDealData(ctx context.Context, dealUuid uuid.UUID
 	}
 
 	ds.InboundFilePath = filePath
+	ds.CleanupData = delAfterImport
 
 	resp, err := p.checkForDealAcceptance(ctx, ds, true)
 	if err != nil {
@@ -242,12 +256,12 @@ func (p *Provider) ImportOfflineDealData(ctx context.Context, dealUuid uuid.UUID
 		return nil, fmt.Errorf("failed to send deal for acceptance: %w", err)
 	}
 
-	// if there was an error, we don't return a rejection reason
+	// if there was an error, we just return the error message (there is no rejection reason)
 	if resp.err != nil {
 		return nil, fmt.Errorf("failed to accept deal: %w", resp.err)
 	}
 
-	// return rejection reason as provider has rejected the deal.
+	// return rejection reason as provider has rejected the deal
 	if !resp.ri.Accepted {
 		p.dealLogger.Infow(dealUuid, "deal execution rejected by provider", "reason", resp.ri.Reason)
 		return resp.ri, nil
@@ -260,7 +274,7 @@ func (p *Provider) ImportOfflineDealData(ctx context.Context, dealUuid uuid.UUID
 // ExecuteDeal is called when the Storage Provider receives a deal proposal
 // from the network
 func (p *Provider) ExecuteDeal(ctx context.Context, dp *types.DealParams, clientPeer peer.ID) (*api.ProviderDealRejectionInfo, error) {
-	ctx, span := tracing.Tracer.Start(ctx, "Provider.ExecuteDeal")
+	ctx, span := tracing.Tracer.Start(ctx, "Provider.ExecuteLibp2pDeal")
 	defer span.End()
 
 	span.SetAttributes(attribute.String("dealUuid", dp.DealUUID.String())) // Example of adding additional attributes
@@ -274,16 +288,23 @@ func (p *Provider) ExecuteDeal(ctx context.Context, dp *types.DealParams, client
 		DealDataRoot:       dp.DealDataRoot,
 		Transfer:           dp.Transfer,
 		IsOffline:          dp.IsOffline,
+		CleanupData:        !dp.IsOffline,
 		Retry:              smtypes.DealRetryAuto,
+		FastRetrieval:      !dp.RemoveUnsealedCopy,
+		AnnounceToIPNI:     !dp.SkipIPNIAnnounce,
 	}
-	// validate the deal proposal
+
+	// Validate the deal proposal
 	if err := p.validateDealProposal(ds); err != nil {
+		// Send the client a reason for the rejection that doesn't reveal the
+		// internal error message
 		reason := err.reason
 		if reason == "" {
 			reason = err.Error()
 		}
-		p.dealLogger.Infow(dp.DealUUID, "deal proposal failed validation", "err", err.Error(), "reason", reason)
 
+		// Log the internal error message
+		p.dealLogger.Infow(dp.DealUUID, "deal proposal failed validation", "err", err.Error(), "reason", reason)
 		return &api.ProviderDealRejectionInfo{
 			Reason: fmt.Sprintf("failed validation: %s", reason),
 		}, nil
@@ -370,6 +391,12 @@ func (p *Provider) Start() error {
 		return fmt.Errorf("failed to migrate db: %w", err)
 	}
 
+	// De-fragment the logs DB
+	_, err = p.logsSqlDB.Exec("Vacuum")
+	if err != nil {
+		log.Errorf("failed to de-fragment the logs db: %w", err)
+	}
+
 	log.Infow("db: initialized")
 
 	// cleanup all completed deals in case Boost resumed before they were cleanedup
@@ -395,7 +422,7 @@ func (p *Provider) Start() error {
 
 	// cleanup all deals that have finished successfully
 	for _, deal := range activeDeals {
-		// Make sure that deals that have reached the index and announce stage
+		// Make sure that deals that have reached the IndexedAndAnnounced stage
 		// have their resources untagged
 		// TODO Update this once we start listening for expired/slashed deals etc
 		if deal.Checkpoint >= dealcheckpoints.IndexedAndAnnounced {
@@ -409,7 +436,7 @@ func (p *Provider) Start() error {
 		// Check if deal is already proving
 		if deal.Checkpoint >= dealcheckpoints.IndexedAndAnnounced {
 			si, err := p.sps.SectorsStatus(p.ctx, deal.SectorID, false)
-			if err != nil || isFinalSealingState(si.State) {
+			if err != nil || IsFinalSealingState(si.State) {
 				continue
 			}
 		}
@@ -419,6 +446,12 @@ func (p *Provider) Start() error {
 		dh, err := p.mkAndInsertDealHandler(deal.DealUuid)
 		if err != nil {
 			p.dealLogger.LogError(deal.DealUuid, "failed to restart deal", err)
+			continue
+		}
+
+		// Fail deals if start epoch has passed
+		if err := p.checkDealProposalStartEpoch(deal); err != nil {
+			go p.failDeal(dh.Publisher, deal, err, false)
 			continue
 		}
 
@@ -453,6 +486,11 @@ func (p *Provider) Start() error {
 
 	// Start the transfer limiter
 	go p.xferLimiter.run(p.ctx)
+
+	// Start hourly deal log cleanup
+	if p.config.DealLogDurationDays > 0 {
+		go p.dealLogger.LogCleanup(p.ctx, p.config.DealLogDurationDays)
+	}
 
 	log.Infow("storage provider: started")
 	return nil
@@ -523,6 +561,32 @@ func (p *Provider) FailPausedDeal(dealUuid uuid.UUID) error {
 	return p.updateRetryState(dealUuid, false)
 }
 
+// CancelOfflineDealAwaitingImport moves an offline deal from waiting for data state to the failed state
+func (p *Provider) CancelOfflineDealAwaitingImport(dealUuid uuid.UUID) error {
+	pds, err := p.dealsDB.ByID(p.ctx, dealUuid)
+	if err != nil {
+		return fmt.Errorf("failed to lookup deal in DB: %w", err)
+	}
+	if !pds.IsOffline {
+		return errors.New("cannot cancel an online deal")
+	}
+
+	if pds.InboundFilePath != "" {
+		return errors.New("deal has already started importing data")
+	}
+
+	dh := p.getDealHandler(dealUuid)
+	if dh == nil {
+		return ErrDealHandlerNotFound
+	}
+
+	if !dh.isRunning() {
+		return p.updateRetryState(dealUuid, false)
+	}
+
+	return errors.New("deal is already running")
+}
+
 // updateRetryState either retries the deal or terminates the deal
 // (depending on the value of retry)
 func (p *Provider) updateRetryState(dealUuid uuid.UUID, retry bool) error {
@@ -579,32 +643,12 @@ func (p *Provider) AddPieceToSector(ctx context.Context, deal smtypes.ProviderDe
 			StartEpoch: deal.ClientDealProposal.Proposal.StartEpoch,
 			EndEpoch:   deal.ClientDealProposal.Proposal.EndEpoch,
 		},
-		// Assume that it doesn't make sense for a miner not to keep an
-		// unsealed copy. TODO: Check that's a valid assumption.
-		//KeepUnsealed: deal.FastRetrieval,
-		KeepUnsealed: true,
+		KeepUnsealed: deal.FastRetrieval,
 	}
 
 	// Attempt to add the piece to a sector (repeatedly if necessary)
 	pieceSize := deal.ClientDealProposal.Proposal.PieceSize.Unpadded()
-	sectorNum, offset, err := p.pieceAdder.AddPiece(ctx, pieceSize, pieceData, sdInfo)
-	curTime := build.Clock.Now()
-
-	for build.Clock.Since(curTime) < addPieceRetryTimeout {
-		if !errors.Is(err, sealing.ErrTooManySectorsSealing) {
-			if err != nil {
-				p.dealLogger.Warnw(deal.DealUuid, "failed to addPiece for deal, will-retry", "err", err.Error())
-			}
-			break
-		}
-		select {
-		case <-build.Clock.After(addPieceRetryWait):
-			sectorNum, offset, err = p.pieceAdder.AddPiece(ctx, pieceSize, pieceData, sdInfo)
-		case <-ctx.Done():
-			return nil, fmt.Errorf("error while waiting to retry AddPiece: %w", ctx.Err())
-		}
-	}
-
+	sectorNum, offset, err := addPieceWithRetry(ctx, p.pieceAdder, pieceSize, pieceData, sdInfo)
 	if err != nil {
 		return nil, fmt.Errorf("AddPiece failed: %w", err)
 	}
@@ -617,16 +661,23 @@ func (p *Provider) AddPieceToSector(ctx context.Context, deal smtypes.ProviderDe
 	}, nil
 }
 
-func (p *Provider) GetBalance(ctx context.Context, addr address.Address, encodedTs shared.TipSetToken) (storagemarket.Balance, error) {
-	tsk, err := ctypes.TipSetKeyFromBytes(encodedTs)
-	if err != nil {
-		return storagemarket.Balance{}, err
-	}
+func addPieceWithRetry(ctx context.Context, pieceAdder smtypes.PieceAdder, pieceSize abi.UnpaddedPieceSize, pieceData io.Reader, sdInfo lapi.PieceDealInfo) (abi.SectorNumber, abi.PaddedPieceSize, error) {
+	sectorNum, offset, err := pieceAdder.AddPiece(ctx, pieceSize, pieceData, sdInfo)
+	curTime := build.Clock.Now()
+	for err != nil && build.Clock.Since(curTime) < addPieceRetryTimeout {
+		// Check if the error was because there are too many sectors sealing
+		if !errors.Is(err, sealing.ErrTooManySectorsSealing) {
+			// There was some other error, return it
+			return 0, 0, err
+		}
 
-	bal, err := p.fullnodeApi.StateMarketBalance(ctx, addr, tsk)
-	if err != nil {
-		return storagemarket.Balance{}, err
+		// There are too many sectors sealing, back off for a while then try again
+		select {
+		case <-build.Clock.After(addPieceRetryWait):
+			sectorNum, offset, err = pieceAdder.AddPiece(ctx, pieceSize, pieceData, sdInfo)
+		case <-ctx.Done():
+			return 0, 0, fmt.Errorf("shutdown while adding piece")
+		}
 	}
-
-	return utils.ToSharedBalance(bal), nil
+	return sectorNum, offset, err
 }

@@ -23,6 +23,10 @@ const (
 // CommP and traversing a DAG with graphsync; invokes a budget on DAG depth and density.
 var MaxTraversalLinks uint64 = 32 * (1 << 20)
 
+const (
+	DefaultAddIndexConcurrency = 8
+)
+
 func init() {
 	if envMaxTraversal, err := strconv.ParseUint(os.Getenv("LOTUS_MAX_TRAVERSAL_LINKS"), 10, 64); err == nil {
 		MaxTraversalLinks = envMaxTraversal
@@ -59,17 +63,44 @@ func DefaultBoost() *Boost {
 		Common: defCommon(),
 
 		Storage: StorageConfig{
-			ParallelFetchLimit: 10,
+			ParallelFetchLimit:            10,
+			StorageListRefreshDuration:    Duration(time.Hour * 1),
+			RedeclareOnStorageListRefresh: true,
 		},
 
 		Graphql: GraphqlConfig{
-			Port: 8080,
+			ListenAddress: "127.0.0.1",
+			Port:          8080,
+		},
+
+		Monitoring: MonitoringConfig{
+			MpoolAlertEpochs: 30,
 		},
 
 		Tracing: TracingConfig{
 			Enabled:     false,
 			Endpoint:    "",
 			ServiceName: "boostd",
+		},
+
+		LocalIndexDirectory: LocalIndexDirectoryConfig{
+			Yugabyte: LocalIndexDirectoryYugabyteConfig{
+				Enabled: false,
+			},
+			Leveldb: LocalIndexDirectoryLeveldbConfig{
+				Enabled: false,
+			},
+			ParallelAddIndexLimit: 4,
+			AddIndexConcurrency:   DefaultAddIndexConcurrency,
+			EmbeddedServicePort:   8042,
+			ServiceApiInfo:        "",
+			ServiceRPCTimeout:     Duration(15 * time.Minute),
+		},
+
+		ContractDeals: ContractDealsConfig{
+			Enabled:            false,
+			AllowlistContracts: []string{},
+			From:               "0x0000000000000000000000000000000000000000",
 		},
 
 		Dealmaking: DealmakingConfig{
@@ -88,6 +119,8 @@ func DefaultBoost() *Boost {
 			StartEpochSealingBuffer: 480, // 480 epochs buffer == 4 hours from adding deal to sector to sector being sealed
 
 			DealProposalLogDuration: Duration(time.Hour * 24),
+			RetrievalLogDuration:    Duration(time.Hour * 24),
+			StalledRetrievalTimeout: Duration(time.Second * 30),
 
 			RetrievalPricing: &lotus_config.RetrievalPricing{
 				Strategy: RetrievalPricingDefaultMode,
@@ -99,6 +132,12 @@ func DefaultBoost() *Boost {
 				},
 			},
 
+			// This should no longer be needed once LID is live
+			BlockstoreCacheMaxShards: 20, // Match default simultaneous retrievals
+			BlockstoreCacheExpiry:    Duration(30 * time.Second),
+
+			IsUnsealedCacheExpiry: Duration(5 * time.Minute),
+
 			MaxTransferDuration: Duration(24 * 3600 * time.Second),
 
 			RemoteCommp:             false,
@@ -107,6 +146,12 @@ func DefaultBoost() *Boost {
 			HttpTransferMaxConcurrentDownloads: 20,
 			HttpTransferStallTimeout:           Duration(5 * time.Minute),
 			HttpTransferStallCheckPeriod:       Duration(30 * time.Second),
+			DealLogDurationDays:                30,
+			SealingPipelineCacheTimeout:        Duration(30 * time.Second),
+			FundsTaggingEnabled:                true,
+			EnableLegacyStorageDeals:           false,
+			ManualDealPublish:                  false,
+			BitswapPublicAddresses:             []string{},
 		},
 
 		LotusDealmaking: lotus_config.DealmakingConfig{
@@ -151,7 +196,7 @@ func DefaultBoost() *Boost {
 			MaxConcurrencyStorageCalls: 100,
 			GCInterval:                 lotus_config.Duration(1 * time.Minute),
 		},
-		IndexProvider: lotus_config.IndexProviderConfig{
+		IndexProvider: IndexProviderConfig{
 			Enable:               true,
 			EntriesCacheCapacity: 1024,
 			EntriesChunkSize:     16384,
@@ -159,6 +204,26 @@ func DefaultBoost() *Boost {
 			// format: "/indexer/ingest/<network-name>"
 			TopicName:         "",
 			PurgeCacheOnStart: false,
+
+			WebHost: "cid.contact",
+
+			Announce: IndexProviderAnnounceConfig{
+				AnnounceOverHttp:   false,
+				DirectAnnounceURLs: []string{"https://cid.contact/ingest/announce"},
+			},
+
+			HttpPublisher: IndexProviderHttpPublisherConfig{
+				Enabled:        false,
+				PublicHostname: "",
+				Port:           3104,
+				WithLibp2p:     false,
+			},
+
+			DataTransferPublisher: false,
+		},
+		HttpDownload: HttpDownloadConfig{
+			NChunks:         5,
+			AllowPrivateIPs: false,
 		},
 	}
 	return cfg

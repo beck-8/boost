@@ -2,19 +2,27 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
+	"time"
 
 	"github.com/filecoin-project/boost/api"
+	"github.com/filecoin-project/boost/build"
+	"github.com/filecoin-project/boost/metrics"
 	"github.com/filecoin-project/boost/node"
 	"github.com/filecoin-project/boost/node/modules/dtypes"
+	"go.opencensus.io/stats"
+	"go.opencensus.io/stats/view"
+	"go.opencensus.io/tag"
 
 	lapi "github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/api/v0api"
 	"github.com/filecoin-project/lotus/api/v1api"
 	lcli "github.com/filecoin-project/lotus/cli"
-	lotus_repo "github.com/filecoin-project/lotus/node/repo"
+	"github.com/filecoin-project/lotus/gateway"
 
-	"net/http"
-	_ "net/http/pprof"
+	lcliutil "github.com/filecoin-project/lotus/cli/util"
+	lotus_repo "github.com/filecoin-project/lotus/node/repo"
 
 	"github.com/urfave/cli/v2"
 )
@@ -32,6 +40,10 @@ var runCmd = &cli.Command{
 			Name:  "nosync",
 			Usage: "dont wait for the full node to sync with the chain",
 		},
+		&cli.BoolFlag{
+			Name:  "no-metrics",
+			Usage: "stops emitting information about the node as metrics (param is used by tests)",
+		},
 	},
 	Action: func(cctx *cli.Context) error {
 		if cctx.Bool("pprof") {
@@ -43,13 +55,31 @@ var runCmd = &cli.Command{
 			}()
 		}
 
-		fullnodeApi, ncloser, err := lcli.GetFullNodeAPIV1(cctx)
+		subCh := gateway.NewEthSubHandler()
+		fullnodeApi, ncloser, err := lcli.GetFullNodeAPIV1(cctx, lcliutil.FullNodeWithEthSubscribtionHandler(subCh))
 		if err != nil {
 			return fmt.Errorf("getting full node api: %w", err)
 		}
 		defer ncloser()
 
 		ctx := lcli.ReqContext(cctx)
+
+		if !cctx.Bool("no-metrics") {
+			ctx, _ = tag.New(ctx,
+				tag.Insert(metrics.Version, build.BuildVersion),
+				tag.Insert(metrics.Commit, build.CurrentCommit),
+				tag.Insert(metrics.NodeType, "boostd"),
+				tag.Insert(metrics.StartedAt, time.Now().String()),
+			)
+			// Register all metric views
+			if err = view.Register(
+				metrics.DefaultViews...,
+			); err != nil {
+				log.Fatalf("Cannot register the view: %v", err)
+			}
+			// Set the metric to one so, it is published to the exporter
+			stats.Record(ctx, metrics.BoostInfo.M(1))
+		}
 
 		log.Debug("Checking full node version")
 
@@ -93,6 +123,7 @@ var runCmd = &cli.Command{
 		var boostApi api.Boost
 		stop, err := node.New(ctx,
 			node.BoostAPI(&boostApi),
+			node.Override(new(*gateway.EthSubHandler), subCh),
 			node.Override(new(dtypes.ShutdownChan), shutdownChan),
 			node.Base(),
 			node.Repo(r),

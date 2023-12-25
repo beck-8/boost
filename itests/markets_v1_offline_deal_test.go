@@ -7,10 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/filecoin-project/boost-gfm/storagemarket"
 	"github.com/filecoin-project/boost/itests/framework"
 	"github.com/filecoin-project/boost/testutil"
-	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/lotus/api"
 	lapi "github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/itests/kit"
 	"github.com/stretchr/testify/require"
@@ -22,7 +21,9 @@ func TestMarketsV1OfflineDeal(t *testing.T) {
 
 	kit.QuietMiningLogs()
 	framework.SetLogLevel()
-	f := framework.NewTestFramework(ctx, t)
+	var opts []framework.FrameworkOpts
+	opts = append(opts, framework.EnableLegacyDeals(true))
+	f := framework.NewTestFramework(ctx, t, opts...)
 	err := f.Start()
 	require.NoError(t, err)
 	defer f.Stop()
@@ -67,7 +68,7 @@ func TestMarketsV1OfflineDeal(t *testing.T) {
 	// Create a CAR file from the raw file
 	log.Debugw("generate out.car for miner")
 	carFilePath := filepath.Join(f.HomeDir, "out.car")
-	err = f.FullNode.ClientGenCar(ctx, api.FileRef{Path: inPath}, carFilePath)
+	err = f.FullNode.ClientGenCar(ctx, lapi.FileRef{Path: inPath}, carFilePath)
 	require.NoError(t, err)
 
 	// Import the CAR file on the miner - this is the equivalent to
@@ -81,7 +82,7 @@ func TestMarketsV1OfflineDeal(t *testing.T) {
 	require.NoError(t, err)
 
 	log.Debugw("offline deal is sealed, starting retrieval", "cid", dealProposalCid, "root", res.Root)
-	outPath := f.Retrieve(ctx, t, dealProposalCid, res.Root, true)
+	outPath := f.Retrieve(ctx, t, dealProposalCid, res.Root, true, nil)
 
 	log.Debugw("retrieval of offline deal is done, compare in- and out- files", "in", inPath, "out", outPath)
 	kit.AssertFilesEqual(t, inPath, outPath)

@@ -5,19 +5,18 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/filecoin-project/boost-gfm/retrievalmarket"
+	"github.com/filecoin-project/boost-gfm/storagemarket/network"
 	bcli "github.com/filecoin-project/boost/cli"
-	"github.com/filecoin-project/boost/cli/ctxutil"
 	clinode "github.com/filecoin-project/boost/cli/node"
 	"github.com/filecoin-project/boost/cmd"
+	"github.com/filecoin-project/boost/extern/boostd-data/shared/cliutil"
 	"github.com/filecoin-project/boost/retrievalmarket/lp2pimpl"
 	"github.com/filecoin-project/go-address"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/network"
-	// TODO: This multiaddr util library should probably live in its own repo
-	multiaddrutil "github.com/filecoin-project/go-legs/httpsync/multiaddr"
 	"github.com/filecoin-project/lotus/chain/types"
 	lcli "github.com/filecoin-project/lotus/cli"
 	"github.com/ipfs/go-cid"
+	"github.com/ipni/go-libipni/maurl"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/urfave/cli/v2"
 )
@@ -45,7 +44,7 @@ var libp2pInfoCmd = &cli.Command{
 	Description: "Lists the libp2p address and protocols supported by the Storage Provider",
 	Before:      before,
 	Action: func(cctx *cli.Context) error {
-		ctx := ctxutil.ReqContext(cctx)
+		ctx := cliutil.ReqContext(cctx)
 
 		if cctx.Args().Len() != 1 {
 			return fmt.Errorf("usage: protocols <provider address>")
@@ -84,7 +83,11 @@ var libp2pInfoCmd = &cli.Command{
 		if err != nil {
 			return fmt.Errorf("getting protocols for peer %s: %w", addrInfo.ID, err)
 		}
-		sort.Strings(protos)
+		protostrs := make([]string, 0, len(protos))
+		for _, proto := range protos {
+			protostrs = append(protostrs, string(proto))
+		}
+		sort.Strings(protostrs)
 
 		agentVersionI, err := n.Host.Peerstore().Get(addrInfo.ID, "AgentVersion")
 		if err != nil {
@@ -98,7 +101,7 @@ var libp2pInfoCmd = &cli.Command{
 				"agent":      agentVersion,
 				"id":         addrInfo.ID.String(),
 				"multiaddrs": addrInfo.Addrs,
-				"protocols":  protos,
+				"protocols":  protostrs,
 			})
 		}
 
@@ -109,7 +112,7 @@ var libp2pInfoCmd = &cli.Command{
 		for _, addr := range addrInfo.Addrs {
 			fmt.Println("  " + addr.String())
 		}
-		fmt.Println("Protocols:\n" + "  " + strings.Join(protos, "\n  "))
+		fmt.Println("Protocols:\n" + "  " + strings.Join(protostrs, "\n  "))
 		return nil
 	},
 }
@@ -394,7 +397,7 @@ var retrievalTransportsCmd = &cli.Command{
 func multiaddrToNative(proto string, ma multiaddr.Multiaddr) string {
 	switch proto {
 	case "http", "https":
-		u, err := multiaddrutil.ToURL(ma)
+		u, err := maurl.ToURL(ma)
 		if err != nil {
 			return ""
 		}

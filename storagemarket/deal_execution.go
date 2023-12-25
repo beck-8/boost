@@ -4,17 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"runtime/debug"
 	"time"
 
+	"github.com/filecoin-project/boost/extern/boostd-data/model"
 	"github.com/filecoin-project/boost/storagemarket/types"
 	smtypes "github.com/filecoin-project/boost/storagemarket/types"
 	"github.com/filecoin-project/boost/storagemarket/types/dealcheckpoints"
 	"github.com/filecoin-project/boost/transport"
 	transporttypes "github.com/filecoin-project/boost/transport/types"
-	"github.com/filecoin-project/dagstore"
-	"github.com/filecoin-project/go-fil-markets/piecestore"
-	"github.com/filecoin-project/go-fil-markets/stores"
 	"github.com/filecoin-project/go-padreader"
 	"github.com/filecoin-project/go-state-types/abi"
 	acrypto "github.com/filecoin-project/go-state-types/crypto"
@@ -80,7 +80,19 @@ func (p *Provider) runDeal(deal *types.ProviderDealState, dh *dealHandler) {
 	p.saveDealToDB(dh.Publisher, deal)
 }
 
-func (p *Provider) execDeal(deal *smtypes.ProviderDealState, dh *dealHandler) *dealMakingError {
+func (p *Provider) execDeal(deal *smtypes.ProviderDealState, dh *dealHandler) (dmerr *dealMakingError) {
+	// Capture any panic as a manually retryable error
+	defer func() {
+		if err := recover(); err != nil {
+			log.Errorw("caught panic executing deal", "id", deal.DealUuid, "err", err)
+			fmt.Fprint(os.Stderr, string(debug.Stack()))
+			dmerr = &dealMakingError{
+				error: fmt.Errorf("Caught panic in deal execution: %s\n%s", err, debug.Stack()),
+				retry: smtypes.DealRetryManual,
+			}
+		}
+	}()
+
 	// If the deal has not yet been handed off to the sealer
 	if deal.Checkpoint < dealcheckpoints.AddedPiece {
 		transferType := "downloaded file"
@@ -98,11 +110,11 @@ func (p *Provider) execDeal(deal *smtypes.ProviderDealState, dh *dealHandler) *d
 		}
 		deal.NBytesReceived = fi.Size()
 		p.dealLogger.Infow(deal.DealUuid, "size of "+transferType, "filepath", deal.InboundFilePath, "size", fi.Size())
-	} else {
-		// if the deal has already been handed to the sealer, the inbound file
-		// could already have been removed and in that case, the number of
-		// bytes received should be the same as deal size as we've already
-		// verified the transfer.
+	} else if !deal.IsOffline {
+		// For online deals where the deal has already been handed to the sealer,
+		// the inbound file could already have been removed and in that case,
+		// the number of bytes received should be the same as deal size as
+		// we've already verified the transfer.
 		deal.NBytesReceived = int64(deal.Transfer.Size)
 	}
 
@@ -118,7 +130,9 @@ func (p *Provider) execDeal(deal *smtypes.ProviderDealState, dh *dealHandler) *d
 
 	// Watch the sealing status of the deal and fire events for each change
 	p.dealLogger.Infow(deal.DealUuid, "watching deal sealing state changes")
-	p.fireSealingUpdateEvents(dh, deal.DealUuid, deal.SectorID)
+	if derr := p.fireSealingUpdateEvents(dh, deal.DealUuid, deal.SectorID); derr != nil {
+		return derr
+	}
 	p.cleanupDealHandler(deal.DealUuid)
 	p.dealLogger.Infow(deal.DealUuid, "deal sealing reached termination state")
 
@@ -206,9 +220,9 @@ func (p *Provider) execDealUptoAddPiece(ctx context.Context, deal *types.Provide
 	}
 
 	// as deal has already been handed to the sealer, we can remove the inbound file and reclaim the tagged space
-	if !deal.IsOffline {
+	if deal.CleanupData {
 		_ = os.Remove(deal.InboundFilePath)
-		p.dealLogger.Infow(deal.DealUuid, "removed inbound file as deal handed to sealer", "path", deal.InboundFilePath)
+		p.dealLogger.Infow(deal.DealUuid, "removed piece data from disk as deal has been added to a sector", "path", deal.InboundFilePath)
 	}
 	if err := p.untagStorageSpaceAfterSealing(ctx, deal); err != nil {
 		// If there's an error untagging storage space we should still try to continue,
@@ -218,13 +232,17 @@ func (p *Provider) execDealUptoAddPiece(ctx context.Context, deal *types.Provide
 		p.dealLogger.Infow(deal.DealUuid, "storage space successfully untagged for deal after it was handed to sealer")
 	}
 
-	// Index deal in DAGStore and Announce deal
+	// Index and Announce deal
 	if deal.Checkpoint < dealcheckpoints.IndexedAndAnnounced {
 		if err := p.indexAndAnnounce(ctx, pub, deal); err != nil {
 			err.error = fmt.Errorf("failed to add index and announce deal: %w", err.error)
 			return err
 		}
-		p.dealLogger.Infow(deal.DealUuid, "deal successfully indexed and announced")
+		if deal.AnnounceToIPNI {
+			p.dealLogger.Infow(deal.DealUuid, "deal successfully indexed and announced")
+		} else {
+			p.dealLogger.Infow(deal.DealUuid, "deal successfully indexed")
+		}
 	} else {
 		p.dealLogger.Infow(deal.DealUuid, "deal has already been indexed and announced")
 	}
@@ -359,19 +377,29 @@ func (p *Provider) transferAndVerify(dh *dealHandler, pub event.Emitter, deal *s
 	return p.updateCheckpoint(pub, deal, dealcheckpoints.Transferred)
 }
 
+const OneGib = 1024 * 1024 * 1024
+
 func (p *Provider) waitForTransferFinish(ctx context.Context, handler transport.Handler, pub event.Emitter, deal *types.ProviderDealState) error {
 	defer handler.Close()
 	defer p.transfers.complete(deal.DealUuid)
 
-	// log transfer progress to the deal log every 10%
-	var lastOutputPct int64
+	// log transfer progress to the deal log every 10% or every GiB
+	var lastOutput int64
 	logTransferProgress := func(received int64) {
-		pct := (100 * received) / int64(deal.Transfer.Size)
-		outputPct := pct / 10
-		if outputPct != lastOutputPct {
-			lastOutputPct = outputPct
-			p.dealLogger.Infow(deal.DealUuid, "transfer progress", "bytes received", received,
-				"deal size", deal.Transfer.Size, "percent complete", pct)
+		if deal.Transfer.Size > 0 {
+			pct := (100 * received) / int64(deal.Transfer.Size)
+			outputPct := pct / 10
+			if outputPct != lastOutput {
+				lastOutput = outputPct
+				p.dealLogger.Infow(deal.DealUuid, "transfer progress", "bytes received", received,
+					"deal size", deal.Transfer.Size, "percent complete", pct)
+			}
+		} else {
+			gib := received / OneGib
+			if gib != lastOutput {
+				lastOutput = gib
+				p.dealLogger.Infow(deal.DealUuid, "transfer progress", "bytes received", received)
+			}
 		}
 	}
 
@@ -426,11 +454,24 @@ func (p *Provider) publishDeal(ctx context.Context, pub event.Emitter, deal *typ
 				}
 			}
 
+			// Check if the client is an f4 address, ie an FVM contract
+			clientAddr := deal.ClientDealProposal.Proposal.Client.String()
+			isContractClient := len(clientAddr) >= 2 && (clientAddr[:2] == "t4" || clientAddr[:2] == "f4")
+
+			if isContractClient {
+				// For contract deal publish errors the deal fails fatally: we don't
+				// want to retry because the deal is probably taken by another SP
+				return &dealMakingError{
+					retry: types.DealRetryFatal,
+					error: fmt.Errorf("fatal error to publish deal %s: %w", deal.DealUuid, err),
+				}
+			}
+
 			// For any other publish error the user must manually retry: we don't
 			// want to automatically retry because deal publishing costs money
 			return &dealMakingError{
 				retry: types.DealRetryManual,
-				error: fmt.Errorf("failed to publish deal %s: %w", deal.DealUuid, err),
+				error: fmt.Errorf("recoverable error to publish deal %s: %w", deal.DealUuid, err),
 			}
 		}
 
@@ -490,54 +531,18 @@ func (p *Provider) addPiece(ctx context.Context, pub event.Emitter, deal *types.
 
 	p.dealLogger.Infow(deal.DealUuid, "add piece called")
 
-	// Open a reader against the CAR file with the deal data
-	v2r, err := carv2.OpenReader(deal.InboundFilePath)
-	if err != nil {
-		return &dealMakingError{
-			retry: types.DealRetryFatal,
-			error: fmt.Errorf("failed to open CARv2 file: %w", err),
-		}
-	}
-	defer func() {
-		if err := v2r.Close(); err != nil {
-			p.dealLogger.Warnw(deal.DealUuid, "failed to close carv2 reader in addpiece", "err", err.Error())
-		}
-	}()
-
-	var size uint64
-	switch v2r.Version {
-	case 1:
-		st, err := os.Stat(deal.InboundFilePath)
-		if err != nil {
-			return &dealMakingError{
-				retry: types.DealRetryFatal,
-				error: fmt.Errorf("failed to stat CARv1 file: %w", err),
-			}
-		}
-		size = uint64(st.Size())
-	case 2:
-		size = v2r.Header.DataSize
-	}
-
-	// Inflate the deal size so that it exactly fills a piece
 	proposal := deal.ClientDealProposal.Proposal
-	r, err := v2r.DataReader()
+	paddedReader, err := openReader(deal.InboundFilePath, proposal.PieceSize.Unpadded())
 	if err != nil {
 		return &dealMakingError{
 			retry: types.DealRetryFatal,
-			error: fmt.Errorf("failed to get data reader over CAR file: %w", err),
-		}
-	}
-	paddedReader, err := padreader.NewInflator(r, size, proposal.PieceSize.Unpadded())
-	if err != nil {
-		return &dealMakingError{
-			retry: types.DealRetryFatal,
-			error: fmt.Errorf("failed to create inflator: %w", err),
+			error: fmt.Errorf("failed to read piece data: %w", err),
 		}
 	}
 
 	// Add the piece to a sector
 	packingInfo, packingErr := p.AddPieceToSector(ctx, *deal, paddedReader)
+	_ = paddedReader.Close()
 	if packingErr != nil {
 		if ctx.Err() != nil {
 			p.dealLogger.Warnw(deal.DealUuid, "context timed out while trying to add piece")
@@ -562,49 +567,82 @@ func (p *Provider) addPiece(ctx context.Context, pub event.Emitter, deal *types.
 	return nil
 }
 
-func (p *Provider) indexAndAnnounce(ctx context.Context, pub event.Emitter, deal *types.ProviderDealState) *dealMakingError {
-	pc := deal.ClientDealProposal.Proposal.PieceCID
+func openReader(filePath string, pieceSize abi.UnpaddedPieceSize) (io.ReadCloser, error) {
+	// Open a reader against the CAR file with the deal data
+	v2r, err := carv2.OpenReader(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open CAR reader over %s: %w", filePath, err)
+	}
 
-	// add deal to piecestore
-	if err := p.ps.AddDealForPiece(pc, piecestore.DealInfo{
-		DealID:   deal.ChainDealID,
-		SectorID: deal.SectorID,
-		Offset:   deal.Offset,
-		Length:   deal.Length,
+	var size uint64
+	switch v2r.Version {
+	case 1:
+		st, err := os.Stat(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat %s: %w", filePath, err)
+		}
+		size = uint64(st.Size())
+	case 2:
+		size = v2r.Header.DataSize
+	}
+
+	// Inflate the deal size so that it exactly fills a piece
+	r, err := v2r.DataReader()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open CAR data reader over %s: %w", filePath, err)
+	}
+
+	reader, err := padreader.NewInflator(r, size, pieceSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inflate data: %w", err)
+	}
+
+	return struct {
+		io.Reader
+		io.Closer
+	}{
+		Reader: reader,
+		Closer: v2r,
+	}, nil
+}
+
+func (p *Provider) indexAndAnnounce(ctx context.Context, pub event.Emitter, deal *types.ProviderDealState) *dealMakingError {
+	// add deal to piece metadata store
+	pc := deal.ClientDealProposal.Proposal.PieceCID
+	p.dealLogger.Infow(deal.DealUuid, "about to add deal for piece in LID")
+	if err := p.piecedirectory.AddDealForPiece(ctx, pc, model.DealInfo{
+		DealUuid:     deal.DealUuid.String(),
+		ChainDealID:  deal.ChainDealID,
+		MinerAddr:    p.Address,
+		SectorID:     deal.SectorID,
+		PieceOffset:  deal.Offset,
+		PieceLength:  deal.Length,
+		CarLength:    uint64(deal.NBytesReceived),
+		IsDirectDeal: false,
 	}); err != nil {
 		return &dealMakingError{
 			retry: types.DealRetryAuto,
-			error: fmt.Errorf("failed to add deal to piecestore: %w", err),
+			error: fmt.Errorf("failed to add deal to piece metadata store: %w", err),
 		}
 	}
-	p.dealLogger.Infow(deal.DealUuid, "deal successfully added to piecestore")
-
-	// register with dagstore
-	err := stores.RegisterShardSync(ctx, p.dagst, pc, "", true)
-
-	if err != nil {
-		if !errors.Is(err, dagstore.ErrShardExists) {
-			return &dealMakingError{
-				retry: types.DealRetryAuto,
-				error: fmt.Errorf("failed to register deal with dagstore: %w", err),
-			}
-		}
-		p.dealLogger.Infow(deal.DealUuid, "deal has previously been registered in dagstore")
-	} else {
-		p.dealLogger.Infow(deal.DealUuid, "deal has successfully been registered in the dagstore")
-	}
+	p.dealLogger.Infow(deal.DealUuid, "deal successfully added to LID")
 
 	// if the index provider is enabled
 	if p.ip.Enabled() {
-		// announce to the network indexer but do not fail the deal if the announcement fails
-		annCid, err := p.ip.AnnounceBoostDeal(ctx, deal)
-		if err != nil {
-			return &dealMakingError{
-				retry: types.DealRetryAuto,
-				error: fmt.Errorf("failed to announce deal to network indexer: %w", err),
+		if deal.AnnounceToIPNI {
+			// announce to the network indexer but do not fail the deal if the announcement fails,
+			// just retry the next time boost restarts
+			annCid, err := p.ip.AnnounceBoostDeal(ctx, deal)
+			if err != nil {
+				return &dealMakingError{
+					retry: types.DealRetryAuto,
+					error: fmt.Errorf("failed to announce deal to network indexer: %w", err),
+				}
 			}
+			p.dealLogger.Infow(deal.DealUuid, "announced deal to network indexer", "announcement-cid", annCid)
+		} else {
+			p.dealLogger.Infow(deal.DealUuid, "didn't announce deal as requested in the deal proposal")
 		}
-		p.dealLogger.Infow(deal.DealUuid, "announced deal to network indexer", "announcement-cid", annCid)
 	} else {
 		p.dealLogger.Infow(deal.DealUuid, "didn't announce deal because network indexer is disabled")
 	}
@@ -618,13 +656,14 @@ func (p *Provider) indexAndAnnounce(ctx context.Context, pub event.Emitter, deal
 
 // fireSealingUpdateEvents periodically checks the sealing status of the deal
 // and fires events for each change
-func (p *Provider) fireSealingUpdateEvents(dh *dealHandler, dealUuid uuid.UUID, sectorNum abi.SectorNumber) {
+func (p *Provider) fireSealingUpdateEvents(dh *dealHandler, dealUuid uuid.UUID, sectorNum abi.SectorNumber) *dealMakingError {
+	var deal *types.ProviderDealState
 	var lastSealingState lapi.SectorState
-	checkStatus := func(force bool) lapi.SectorState {
+	checkStatus := func(force bool) lapi.SectorInfo {
 		// To avoid overloading the sealing service, only get the sector status
 		// if there's at least one subscriber to the event that will be published
 		if !force && !dh.hasActiveSubscribers() {
-			return ""
+			return lapi.SectorInfo{}
 		}
 
 		// Get the sector status
@@ -633,51 +672,62 @@ func (p *Provider) fireSealingUpdateEvents(dh *dealHandler, dealUuid uuid.UUID, 
 			lastSealingState = si.State
 
 			// Sector status has changed, fire an update event
-			deal, err := p.dealsDB.ByID(p.ctx, dealUuid)
+			deal, err = p.dealsDB.ByID(p.ctx, dealUuid)
 			if err != nil {
 				log.Errorf("getting deal %s with sealing update: %w", dealUuid, err)
-				return si.State
+				return si
 			}
 
 			p.dealLogger.Infow(dealUuid, "current sealing state", "state", si.State)
 			p.fireEventDealUpdate(dh.Publisher, deal)
 		}
-		return si.State
+		return si
+	}
+
+	retErr := &dealMakingError{
+		retry: types.DealRetryFatal,
+		error: ErrDealNotInSector,
 	}
 
 	// Check status immediately
-	state := checkStatus(true)
-	if isFinalSealingState(state) {
-		return
+	info := checkStatus(true)
+	if IsFinalSealingState(info.State) {
+		if HasDeal(info.Deals, deal.ChainDealID) {
+			return nil
+		}
+		return retErr
 	}
 
-	// Check status every second
-	ticker := time.NewTicker(time.Second)
+	// Check status every 10 second. There is no advantage of checking it every second
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	count := 0
-	forceCount := 60
+	forceCount := 12
 	for {
 		select {
 		case <-p.ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 			count++
-			// Force a status check every forceCount seconds, even if there
+			// Force a status check every (ticker * forceCount) seconds, even if there
 			// are no subscribers (so that we can stop checking altogether
 			// if the sector reaches a final sealing state)
-			state := checkStatus(count >= forceCount)
+			info = checkStatus(count >= forceCount)
 			if count >= forceCount {
 				count = 0
 			}
 
-			if isFinalSealingState(state) {
-				return
+			if IsFinalSealingState(info.State) {
+				if HasDeal(info.Deals, deal.ChainDealID) {
+					return nil
+				}
+				return retErr
 			}
 		}
 	}
 }
 
-func isFinalSealingState(state lapi.SectorState) bool {
+func IsFinalSealingState(state lapi.SectorState) bool {
 	switch sealing.SectorState(state) {
 	case
 		sealing.Proving,
@@ -693,6 +743,17 @@ func isFinalSealingState(state lapi.SectorState) bool {
 		return true
 	}
 	return false
+}
+
+func HasDeal(deals []abi.DealID, pdsDealId abi.DealID) bool {
+	var ret bool
+	for _, d := range deals {
+		if d == pdsDealId {
+			ret = true
+			break
+		}
+	}
+	return ret
 }
 
 func (p *Provider) failDeal(pub event.Emitter, deal *smtypes.ProviderDealState, err error, cancelled bool) {

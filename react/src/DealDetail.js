@@ -1,16 +1,18 @@
 /* global BigInt */
 
-import React, {useEffect, useState} from "react";
+import React, {useEffect} from "react";
 import {useMutation, useQuery, useSubscription} from "@apollo/react-hooks";
 import {DealCancelMutation, DealFailPausedMutation, DealRetryPausedMutation, DealSubscription, EpochQuery} from "./gql";
 import {useNavigate, useParams, Link} from "react-router-dom";
 import {dateFormat} from "./util-date";
 import moment from "moment";
-import {addCommas, humanFIL, humanFileSize} from "./util";
+import {addCommas, humanFIL, humanFileSize, isContractAddress} from "./util";
 import './DealDetail.css'
+import './Components.css'
 import closeImg from './bootstrap-icons/icons/x-circle.svg'
 import {Info} from "./Info";
 import {addClassFor} from "./util-ui";
+import {ExpandableJSObject} from "./Components";
 
 export function DealDetail(props) {
     const params = useParams()
@@ -128,8 +130,11 @@ export function DealDetail(props) {
                 <tr>
                     <th>Client Address</th>
                     <td>
-                        <a href={"https://filfox.info/en/address/"+deal.ClientAddress} target="_blank" rel="noreferrer">
+                        <a href={"https://filfox.info/en/address/"+deal.ClientAddress} target="_blank" rel="noreferrer"
+                            className={isContractAddress(deal.ClientAddress) ? 'contract' : ''}
+                        >
                             {deal.ClientAddress}
+                            {isContractAddress(deal.ClientAddress) ? <span className="aux"> (Contract)</span> : ''}
                         </a>
                     </td>
                 </tr>
@@ -142,16 +147,24 @@ export function DealDetail(props) {
                     <td>{deal.SignedProposalCid}</td>
                 </tr>
                 <tr>
-                    <th>Deal Data Root CID</th>
-                    <td><Link to={'/inspect/'+deal.DealDataRoot}>{deal.DealDataRoot}</Link></td>
+                    <th>Label</th>
+                    <td>{deal.DealDataRoot}</td>
                 </tr>
                 <tr>
                     <th>Verified</th>
                     <td>{deal.IsVerified ? 'Yes' : 'No'}</td>
                 </tr>
                 <tr>
+                    <th>Keep Unsealed Copy</th>
+                    <td>{deal.KeepUnsealedCopy ? 'Yes' : 'No'}</td>
+                </tr>
+                <tr>
+                    <th>Announce To IPNI</th>
+                    <td>{deal.AnnounceToIPNI ? 'Yes' : 'No'}</td>
+                </tr>
+                <tr>
                     <th>Piece CID</th>
-                    <td><Link to={'/inspect/'+deal.PieceCid}>{deal.PieceCid}</Link></td>
+                    <td><Link to={'/piece-doctor/'+deal.PieceCid}>{deal.PieceCid}</Link></td>
                 </tr>
                 <tr>
                     <th>Piece Size</th>
@@ -256,6 +269,10 @@ export function DealDetail(props) {
                     <th>Inbound File Path</th>
                     <td>{deal.InboundFilePath}</td>
                 </tr>
+                <tr>
+                    <th>Delete After Add Piece</th>
+                    <td>{deal.CleanupData ? 'Yes' : 'No'}</td>
+                </tr>
                 {deal.Sector.ID > 0 ? (
                     <>
                     <tr>
@@ -344,7 +361,8 @@ export function DealActions(props) {
 
     const showRetryFailButtons = IsPaused(deal)
     const showCancelButton = !showRetryFailButtons && IsTransferring(deal)
-    if (!showCancelButton && !showRetryFailButtons) {
+    const showCancelOfflineWaitingForData = !showRetryFailButtons && !showCancelButton && IsOfflineWaitingForData(deal)
+    if (!showCancelButton && !showRetryFailButtons && !showCancelOfflineWaitingForData) {
         return null
     }
 
@@ -355,6 +373,11 @@ export function DealActions(props) {
                     {compact ? '' : 'Cancel Transfer'}
                 </div>
             ) : null}
+            {showCancelOfflineWaitingForData ? (
+                <div className="button cancel offline" title="Cancel Offline Deal" onClick={cancelDeal}>
+                    {compact ? '' : 'Cancel Offline Deal'}
+                </div>
+            ) : null }
             {showRetryFailButtons ? (
                 <>
                     <div className="button retry" title="Retry Deal" onClick={retryPausedDeal}>
@@ -377,7 +400,11 @@ export function IsTransferring(deal) {
     return deal.Checkpoint === 'Accepted' && !deal.IsOffline
 }
 
-function DealLog(props) {
+export function IsOfflineWaitingForData(deal) {
+    return deal.IsOffline && deal.Checkpoint === 'Accepted'
+}
+
+export function DealLog(props) {
     var prev = props.prev
     var log = props.log
     var sinceLast = ''
@@ -424,42 +451,12 @@ function DealLog(props) {
                 <span className="subsystem">{log.Subsystem}{log.Subsystem ? ': ' : ''}</span>
                 {log.LogMsg}
             </div>
-            {Object.keys(logParams).sort().map(k => <LogParam k={k} v={logParams[k]} topLevel={true} key={k} />)}
+            {Object.keys(logParams).sort().map(k => <ExpandableJSObject k={k} v={logParams[k]} topLevel={true} key={k} />)}
         </td>
     </tr>
 }
 
-function LogParam(props) {
-    const [expanded, setExpanded] = useState(false)
-
-    var val = props.v
-    const isObject = (val && typeof val === 'object')
-    if (isObject) {
-        val = Object.keys(val).sort().map(ck => <LogParam k={ck} v={val[ck]} key={ck} />)
-    } else if ((typeof val === 'string' || typeof val === 'number') && (''+val).match(/^[0-9]+$/)) {
-        val = addCommas(BigInt(val))
-    }
-
-    function toggleExpandState() {
-        setExpanded(!expanded)
-    }
-
-    const expandable = isObject && props.topLevel
-    return (
-        <div className={"param" + (expandable ? ' expandable' : '') + (expanded ? ' expanded' : '')}>
-            <span className="param-name" onClick={toggleExpandState}>
-                {props.k}:
-                {expandable ? (
-                    <div className="expand-collapse"></div>
-                ) : null}
-            </span>
-            &nbsp;
-            {val}
-        </div>
-    )
-}
-
-function getAllDataAsText(detailTableEl, dealID, logs) {
+export function getAllDataAsText(detailTableEl, dealID, logs) {
     var lines = []
     lines.push('=== Deal ' + dealID + ' ===')
     lines.push('')
@@ -497,7 +494,7 @@ function getAllDataAsText(detailTableEl, dealID, logs) {
     return lines.join('\n')+'\n'
 }
 
-function DealStatusInfo(props) {
+export function DealStatusInfo(props) {
     return <span className="deal-status-info">
         <Info>
             The deal can be in one of the following states:

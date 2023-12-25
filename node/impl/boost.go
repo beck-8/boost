@@ -5,30 +5,33 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 
-	tracing "github.com/filecoin-project/boost/tracing"
+	"github.com/filecoin-project/boost/node/impl/backupmgr"
+	"github.com/filecoin-project/boost/piecedirectory"
 	"github.com/multiformats/go-multihash"
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/filecoin-project/go-fil-markets/stores"
-
+	"github.com/filecoin-project/boost-gfm/retrievalmarket"
+	gfm_storagemarket "github.com/filecoin-project/boost-gfm/storagemarket"
 	"github.com/filecoin-project/boost/api"
+	"github.com/filecoin-project/boost/extern/boostd-data/shared/tracing"
 	"github.com/filecoin-project/boost/gql"
 	"github.com/filecoin-project/boost/indexprovider"
+	"github.com/filecoin-project/boost/markets/storageadapter"
 	"github.com/filecoin-project/boost/node/modules/dtypes"
-	"github.com/filecoin-project/boost/sealingpipeline"
+	retmarket "github.com/filecoin-project/boost/retrievalmarket/server"
 	"github.com/filecoin-project/boost/storagemarket"
+	"github.com/filecoin-project/boost/storagemarket/sealingpipeline"
 	"github.com/filecoin-project/boost/storagemarket/types"
 	"github.com/filecoin-project/dagstore"
 	"github.com/filecoin-project/dagstore/shard"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
-	lotus_storagemarket "github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-jsonrpc/auth"
 	lapi "github.com/filecoin-project/lotus/api"
+	"github.com/filecoin-project/lotus/gateway"
 	mktsdagstore "github.com/filecoin-project/lotus/markets/dagstore"
-	"github.com/filecoin-project/lotus/markets/storageadapter"
 	lotus_dtypes "github.com/filecoin-project/lotus/node/modules/dtypes"
 	"github.com/filecoin-project/lotus/storage/sectorblocks"
 	"github.com/google/uuid"
@@ -46,7 +49,8 @@ type BoostAPI struct {
 	api.Common
 	api.Net
 
-	Full lapi.FullNode
+	Full  lapi.FullNode
+	SubCh *gateway.EthSubHandler
 
 	Host host.Host
 
@@ -57,20 +61,29 @@ type BoostAPI struct {
 	StorageProvider *storagemarket.Provider
 	IndexProvider   *indexprovider.Wrapper
 
+	// Boost - Direct Data onboarding
+	DirectDealsProvider *storagemarket.DirectDealsProvider
+
 	// Legacy Lotus
-	LegacyStorageProvider lotus_storagemarket.StorageProvider
+	LegacyStorageProvider gfm_storagemarket.StorageProvider
 
 	// Lotus Markets
 	SectorBlocks *sectorblocks.SectorBlocks
-	PieceStore   lotus_dtypes.ProviderPieceStore
-	DataTransfer lotus_dtypes.ProviderDataTransfer
+	PieceStore   dtypes.ProviderPieceStore
+	DataTransfer dtypes.ProviderDataTransfer
 
 	RetrievalProvider retrievalmarket.RetrievalProvider
 	SectorAccessor    retrievalmarket.SectorAccessor
 	DealPublisher     *storageadapter.DealPublisher
 
+	// Graphsync Unpaid Retrieval
+	GraphsyncUnpaidRetrieval *retmarket.GraphsyncUnpaidRetrieval
+
 	// Sealing Pipeline API
 	Sps sealingpipeline.API
+
+	// Piece Directory
+	Pd *piecedirectory.PieceDirectory
 
 	// GraphSQL server
 	GraphqlServer *gql.Server
@@ -79,6 +92,8 @@ type BoostAPI struct {
 	Tracing *tracing.Tracing
 
 	DS lotus_dtypes.MetadataDS
+
+	Bkp *backupmgr.BackupMgr
 
 	ConsiderOnlineStorageDealsConfigFunc        lotus_dtypes.ConsiderOnlineStorageDealsConfigFunc        `optional:"true"`
 	SetConsiderOnlineStorageDealsConfigFunc     lotus_dtypes.SetConsiderOnlineStorageDealsConfigFunc     `optional:"true"`
@@ -138,8 +153,38 @@ func (sm *BoostAPI) BoostIndexerAnnounceAllDeals(ctx context.Context) error {
 	return sm.IndexProvider.IndexerAnnounceAllDeals(ctx)
 }
 
-func (sm *BoostAPI) BoostOfflineDealWithData(ctx context.Context, dealUuid uuid.UUID, filePath string) (*api.ProviderDealRejectionInfo, error) {
-	res, err := sm.StorageProvider.ImportOfflineDealData(ctx, dealUuid, filePath)
+// BoostIndexerListMultihashes calls the index provider multihash lister for a given proposal cid
+func (sm *BoostAPI) BoostIndexerListMultihashes(ctx context.Context, proposalCid cid.Cid) ([]multihash.Multihash, error) {
+	it, err := sm.IndexProvider.MultihashLister(ctx, "", proposalCid.Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	var mhs []multihash.Multihash
+	mh, err := it.Next()
+	for {
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return mhs, nil
+			}
+			return nil, err
+		}
+		mhs = append(mhs, mh)
+
+		mh, err = it.Next()
+	}
+}
+
+func (sm *BoostAPI) BoostIndexerAnnounceLatest(ctx context.Context) (cid.Cid, error) {
+	return sm.IndexProvider.IndexerAnnounceLatest(ctx)
+}
+
+func (sm *BoostAPI) BoostIndexerAnnounceLatestHttp(ctx context.Context, announceUrls []string) (cid.Cid, error) {
+	return sm.IndexProvider.IndexerAnnounceLatestHttp(ctx, announceUrls)
+}
+
+func (sm *BoostAPI) BoostOfflineDealWithData(ctx context.Context, dealUuid uuid.UUID, filePath string, delAfterImport bool) (*api.ProviderDealRejectionInfo, error) {
+	res, err := sm.StorageProvider.ImportOfflineDealData(ctx, dealUuid, filePath, delAfterImport)
 	return res, err
 }
 
@@ -425,7 +470,7 @@ func (sm *BoostAPI) BoostDagstoreRegisterShard(ctx context.Context, key string) 
 	if err != nil {
 		return fmt.Errorf("parsing shard key as piece cid: %w", err)
 	}
-	if err = stores.RegisterShardSync(ctx, sm.DagStoreWrapper, pieceCid, "", true); err != nil {
+	if err = registerShardSync(ctx, sm.DagStoreWrapper, pieceCid, "", true); err != nil {
 		return fmt.Errorf("failed to register shard: %w", err)
 	}
 
@@ -478,24 +523,71 @@ func (sm *BoostAPI) BoostDagstoreDestroyShard(ctx context.Context, key string) e
 	if err != nil {
 		return fmt.Errorf("parsing shard key as piece cid: %w", err)
 	}
-	if err = stores.DestroyShardSync(ctx, sm.DagStoreWrapper, pieceCid); err != nil {
+	if err = destroyShardSync(ctx, sm.DagStoreWrapper, pieceCid); err != nil {
 		return fmt.Errorf("failed to destroy shard: %w", err)
 	}
 	return nil
 }
 
+func (sm *BoostAPI) BoostDirectDeal(ctx context.Context, params types.DirectDealParams) (*api.ProviderDealRejectionInfo, error) {
+	return nil, fmt.Errorf("not implemented")
+	// return sm.DirectDealsProvider.Import(ctx, params)
+}
+
+func (sm *BoostAPI) BoostMakeDeal(ctx context.Context, params types.DealParams) (*api.ProviderDealRejectionInfo, error) {
+	log.Infow("received json-rpc deal proposal", "id", params.DealUUID)
+	return sm.StorageProvider.ExecuteDeal(ctx, &params, "json-rpc-deal")
+}
+
 func (sm *BoostAPI) BlockstoreGet(ctx context.Context, c cid.Cid) ([]byte, error) {
-	blk, err := sm.IndexBackedBlockstore.Get(ctx, c)
-	if err != nil {
-		return nil, err
-	}
-	return blk.RawData(), nil
+	return sm.Pd.BlockstoreGet(ctx, c)
 }
 
 func (sm *BoostAPI) BlockstoreHas(ctx context.Context, c cid.Cid) (bool, error) {
-	return sm.IndexBackedBlockstore.Has(ctx, c)
+	return sm.Pd.BlockstoreHas(ctx, c)
 }
 
 func (sm *BoostAPI) BlockstoreGetSize(ctx context.Context, c cid.Cid) (int, error) {
-	return sm.IndexBackedBlockstore.GetSize(ctx, c)
+	return sm.Pd.BlockstoreGetSize(ctx, c)
+}
+
+func (sm *BoostAPI) PdBuildIndexForPieceCid(ctx context.Context, piececid cid.Cid) error {
+	ctx, span := tracing.Tracer.Start(ctx, "Boost.PdBuildIndexForPieceCid")
+	span.SetAttributes(attribute.String("piececid", piececid.String()))
+	defer span.End()
+
+	return sm.Pd.BuildIndexForPiece(ctx, piececid)
+}
+
+func (sm *BoostAPI) OnlineBackup(ctx context.Context, dstDir string) error {
+	return sm.Bkp.Backup(ctx, dstDir)
+}
+
+func registerShardSync(ctx context.Context, ds *mktsdagstore.Wrapper, pieceCid cid.Cid, carPath string, eagerInit bool) error {
+	resch := make(chan dagstore.ShardResult, 1)
+	if err := ds.RegisterShard(ctx, pieceCid, carPath, eagerInit, resch); err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case res := <-resch:
+		return res.Error
+	}
+}
+
+func destroyShardSync(ctx context.Context, ds *mktsdagstore.Wrapper, pieceCid cid.Cid) error {
+	resch := make(chan dagstore.ShardResult, 1)
+
+	if err := ds.DestroyShard(ctx, pieceCid, resch); err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case res := <-resch:
+		return res.Error
+	}
 }
