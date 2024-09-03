@@ -29,10 +29,16 @@ func CreateAllocationMsg(ctx context.Context, api api.Gateway, infos []PieceInfo
 		return nil, err
 	}
 
+	oldallocations, err := api.StateGetAllocations(ctx, wallet, types.EmptyTSK)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get allocations: %w", err)
+	}
+
 	rDataCap := big.NewInt(0)
 
 	// Create allocation requests
 	var allocationRequests []verifreg9.AllocationRequest
+outerLoop:
 	for _, info := range infos {
 		minfo, err := api.StateMinerInfo(ctx, info.MinerAddr, types.EmptyTSK)
 		if err != nil {
@@ -41,6 +47,13 @@ func CreateAllocationMsg(ctx context.Context, api api.Gateway, infos []PieceInfo
 		if uint64(minfo.SectorSize) < uint64(info.Size) {
 			return nil, fmt.Errorf("specified piece size %d is bigger than miner's sector size %s", info.Size, minfo.SectorSize.String())
 		}
+
+		for _, v := range oldallocations {
+			if v.Provider == info.Miner && v.Data == info.Cid {
+				continue outerLoop
+			}
+		}
+
 		allocationRequests = append(allocationRequests, verifreg9.AllocationRequest{
 			Provider:   info.Miner,
 			Data:       info.Cid,
